@@ -1,3 +1,12 @@
+"""
+DomBot Admissional
+==================
+Automação RPA para emissão de Contratos Admissionais no sistema Domínio Folha.
+
+Autor: Hugo L. Almeida
+Versão: 1.0
+"""
+
 import customtkinter as ctk
 import pandas as pd
 from pywinauto.application import Application
@@ -16,8 +25,9 @@ import tkinter.messagebox as messagebox
 from PIL import Image, ImageDraw
 
 
-# Handler de log separado da classe principal
 class GUILogHandler(logging.Handler):
+    """Handler de logging que encaminha mensagens para a interface gráfica."""
+
     def __init__(self, gui):
         super().__init__()
         self.gui = gui
@@ -28,6 +38,8 @@ class GUILogHandler(logging.Handler):
 
 
 class AutomacaoGUI:
+    """Interface gráfica principal da automação."""
+
     # Cores do tema
     CORES = {
         'sucesso': '#2ECC71',
@@ -454,7 +466,7 @@ class AutomacaoGUI:
             self.preview_text.insert("end", f"{'─' * len(header)}\n")
 
             # Dados (primeiras 50 linhas)
-            for idx, row in self.df_carregado.head(50).iterrows():
+            for _, row in self.df_carregado.head(50).iterrows():
                 row_text = " | ".join([f"{str(val)[:15]:^15}" for val in row.values[:6]])
                 self.preview_text.insert("end", f"{row_text}\n")
 
