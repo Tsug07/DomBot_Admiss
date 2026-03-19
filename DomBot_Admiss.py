@@ -801,6 +801,7 @@ class DominioAutomation:
         self.main_window = None
         self.logger = logger
         self.gui = gui
+        self.empresa_atual = None
 
     def log(self, message):
         self.logger.info(message)
@@ -1117,10 +1118,14 @@ class DominioAutomation:
             win32gui.SetForegroundWindow(handle)
             time.sleep(0.2)
 
-            # Troca de empresa
+            # Troca de empresa (só troca se for diferente da atual)
             empresa_num = str(int(row['Nº']))
-            if not self.handle_empresa_change(empresa_num):
-                return False
+            if empresa_num != self.empresa_atual:
+                if not self.handle_empresa_change(empresa_num):
+                    return False
+                self.empresa_atual = empresa_num
+            else:
+                self.log(f"🏢 Empresa {empresa_num} já selecionada, pulando troca")
 
             if self.should_stop():
                 return False
