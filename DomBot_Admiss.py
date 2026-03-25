@@ -521,12 +521,13 @@ class AutomacaoGUI:
 
     def atualizar_tempo(self):
         """Atualiza o tempo decorrido"""
-        if self.stats['tempo_inicio'] and self.executando:
+        if self.stats['tempo_inicio']:
             elapsed = datetime.now() - self.stats['tempo_inicio']
             hours, remainder = divmod(int(elapsed.total_seconds()), 3600)
             minutes, seconds = divmod(remainder, 60)
             self.tempo_label.configure(text=f"{hours:02d}:{minutes:02d}:{seconds:02d}")
-            self.window.after(1000, self.atualizar_tempo)
+            if self.executando:
+                self.window.after(1000, self.atualizar_tempo)
 
     def atualizar_status_indicator(self, status):
         """Atualiza o indicador de status visual"""
@@ -787,6 +788,7 @@ class AutomacaoGUI:
         finally:
             self.executando = False
             self.pausa_solicitada = False
+            self.atualizar_tempo()  # Atualização final do timer
             self.btn_iniciar.configure(state="normal")
             self.btn_pausar.configure(state="disabled", text="⏸ Pausar")
             self.btn_parar.configure(state="disabled")
@@ -878,6 +880,27 @@ class DominioAutomation:
                         if win32gui.GetClassName(hwnd) == class_name:
                             result[0] = True
                             return False
+                    except Exception:
+                        pass
+                return True
+            win32gui.EnumWindows(callback, None)
+            return result[0]
+        except Exception:
+            return False
+
+    def _save_dialog_exists(self) -> bool:
+        """Verifica se a janela de salvamento existe procurando pelo elemento 'Salvar em:' (AutomationId 1091)."""
+        try:
+            result = [False]
+            def callback(hwnd, _):
+                if win32gui.IsWindowVisible(hwnd):
+                    try:
+                        if win32gui.GetClassName(hwnd) == "#32770":
+                            # Procura pelo controle filho "Salvar em:" (Static, AutomationId=1091)
+                            child = win32gui.FindWindowEx(hwnd, 0, "Static", "Salvar em:")
+                            if child:
+                                result[0] = True
+                                return False
                     except Exception:
                         pass
                 return True
@@ -1275,16 +1298,31 @@ class DominioAutomation:
             while time.time() - inicio < timeout_total:
                 if self.should_stop():
                     return False
+
+                # Verificar diálogos de erro/aviso
                 if self._any_error_dialog_visible():
-                    break
-                if self._window_exists("Salvar em PDF", "#32770"):
+                    deve_continuar = self.handle_error_dialogs()
+                    if deve_continuar:
+                        # Aviso não crítico (ex: erro de gravação) — janela de salvamento deve abrir após fechar
+                        self.log("🔄 Aviso tratado, continuando aguardo da janela de salvamento...")
+                        time.sleep(0.5)
+                        continue
+                    else:
+                        # Erro que aborta (ex: sem dados para emitir) — limpa e sai
+                        self.log("⚠️ Diálogo de erro detectado, abortando linha")
+                        self.cleanup_windows()
+                        return False
+
+                if self._window_exists("Salvar em PDF", "#32770") or self._save_dialog_exists():
                     janela_encontrada = True
                     break
                 send_keys('^d')  # Ctrl+D
                 for _ in range(int(intervalo_ctrl_d / 0.25)):
                     if self.should_stop():
                         return False
-                    if self._window_exists("Salvar em PDF", "#32770"):
+                    if self._any_error_dialog_visible():
+                        break  # Volta pro while para tratar o diálogo
+                    if self._window_exists("Salvar em PDF", "#32770") or self._save_dialog_exists():
                         janela_encontrada = True
                         break
                     time.sleep(0.25)
@@ -1321,8 +1359,25 @@ class DominioAutomation:
             )
 
             if not save_window.exists():
-                self.log("❌ Janela de salvamento não encontrada")
-                return False
+                # Fallback: procura janela de salvamento pelo elemento "Salvar em:" (AutomationId 1091)
+                self.log("🔍 Procurando janela de salvamento alternativa...")
+                try:
+                    save_window = self.main_window.child_window(
+                        class_name="#32770",
+                        found_index=0
+                    )
+                    # Confirma que é a janela correta verificando o controle "Salvar em:"
+                    salvar_em_label = save_window.child_window(
+                        auto_id="1091",
+                        class_name="Static"
+                    )
+                    if not salvar_em_label.exists():
+                        self.log("❌ Janela de salvamento não encontrada")
+                        return False
+                    self.log("✅ Janela de salvamento encontrada via elemento 'Salvar em:'")
+                except Exception:
+                    self.log("❌ Janela de salvamento não encontrada")
+                    return False
 
             if self.should_stop():
                 return False
@@ -1425,15 +1480,31 @@ class DominioAutomation:
 
             self.log(f"⚠️ Diálogo detectado: '{found_title}' - {message[:100] if message else 'sem mensagem'}")
 
-            mensagens_continuar = [
+            # Mensagens de aviso que, ao fechar, abrem a janela de salvamento (continua o fluxo)
+            mensagens_continuar_salvamento = [
+                "erro na gravação do relatório",
+                "nome do caminho inválido",
+                "caracteres não permitidos"
+            ]
+
+            message_lower = message.lower()
+            for msg in mensagens_continuar_salvamento:
+                if msg in message_lower:
+                    self.log(f"⚠️ Aviso de gravação detectado (não crítico): {msg}")
+                    error_window.set_focus()
+                    send_keys('{ENTER}')
+                    time.sleep(0.5)
+                    return True  # Continua o fluxo — janela de salvamento vai abrir após fechar este aviso
+
+            # Mensagens que indicam que não há dados — aborta a linha atual
+            mensagens_abortar = [
                 "sem dados para emitir",
                 "nenhum registro encontrado",
                 "não há dados",
                 "registro não encontrado"
             ]
 
-            message_lower = message.lower()
-            for msg in mensagens_continuar:
+            for msg in mensagens_abortar:
                 if msg in message_lower:
                     self.log(f"⚠️ Aviso não crítico: {msg}")
                     error_window.set_focus()
