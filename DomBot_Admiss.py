@@ -16,8 +16,12 @@ import win32gui
 import win32con
 import time
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
+import requests
+from dotenv import load_dotenv
+
+load_dotenv()
 import traceback
 import threading
 from typing import Optional, Tuple
@@ -778,6 +782,23 @@ class AutomacaoGUI:
                 self.atualizar_status_indicator('concluido')
                 self.adicionar_log("Automação concluída!", logging.INFO, "sucesso")
                 self.adicionar_log(f"Resumo: {self.linhas_processadas} processadas, {self.linhas_com_erro} com erro, {self.linhas_puladas} puladas", logging.INFO, "info")
+
+                # Enviar notificação ao Discord via webhook
+                try:
+                    data_referencia = (datetime.now() + timedelta(days=1)).strftime("%d/%m/%Y")
+                    pasta_planilha = os.path.dirname(os.path.abspath(self.arquivo_excel.get()))
+                    mensagem = (
+                        f"📋 **Contratos Admissionais Emitidos**\n\n"
+                        f"📅 **Data de referência:** {data_referencia}\n"
+                        f"📊 **Quantidade emitida:** {self.linhas_processadas}\n"
+                        f"📂 **Pasta da planilha:** `{pasta_planilha}`\n\n"
+                        f"✅ Emissão finalizada com sucesso!"
+                    )
+                    webhook_url = os.getenv("DISCORD_WEBHOOK_URL")
+                    requests.post(webhook_url, json={"content": mensagem}, timeout=10)
+                    self.adicionar_log("Notificação enviada ao Discord", logging.INFO, "sucesso")
+                except Exception as e:
+                    self.adicionar_log(f"Erro ao enviar notificação ao Discord: {str(e)}", logging.WARNING, "aviso")
 
         except Exception as e:
             erro_msg = f"Erro crítico: {str(e)}"
