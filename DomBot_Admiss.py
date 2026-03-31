@@ -99,6 +99,8 @@ class AutomacaoGUI:
         # Variáveis da interface
         self.arquivo_excel = ctk.StringVar()
         self.linha_inicial = ctk.StringVar(value="2")
+        self.periodo_referencia = ctk.StringVar(value=(datetime.now() + timedelta(days=1)).strftime("%d/%m/%Y"))
+        self.diretorio_salvamento = ctk.StringVar()
         self.status_var = ctk.StringVar(value="Aguardando início...")
 
         # Variáveis de controle
@@ -302,6 +304,48 @@ class AutomacaoGUI:
         )
         self.btn_parar.grid(row=0, column=7, padx=(3, 0))
 
+        # Segunda linha — Período de referência e Diretório de salvamento
+        inner_frame2 = ctk.CTkFrame(config_frame, fg_color="transparent")
+        inner_frame2.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 8))
+        inner_frame2.grid_columnconfigure(2, weight=1)
+
+        # Período de referência
+        ctk.CTkLabel(
+            inner_frame2, text="📅", font=ctk.CTkFont(size=14)
+        ).grid(row=0, column=0, padx=(0, 5))
+
+        ctk.CTkLabel(
+            inner_frame2, text="Período:", font=ctk.CTkFont(size=11), text_color="#BDC3C7"
+        ).grid(row=0, column=1, padx=(0, 3))
+
+        self.entry_periodo = ctk.CTkEntry(
+            inner_frame2, textvariable=self.periodo_referencia,
+            width=100, height=32, font=ctk.CTkFont(size=11), justify="center",
+            placeholder_text="dd/mm/aaaa"
+        )
+        self.entry_periodo.grid(row=0, column=2, sticky="w", padx=(0, 15))
+
+        # Diretório de salvamento
+        ctk.CTkLabel(
+            inner_frame2, text="📂", font=ctk.CTkFont(size=14)
+        ).grid(row=0, column=3, padx=(0, 5))
+
+        self.entry_diretorio = ctk.CTkEntry(
+            inner_frame2,
+            textvariable=self.diretorio_salvamento,
+            placeholder_text="Diretório onde os PDFs serão salvos...",
+            height=32,
+            font=ctk.CTkFont(size=11)
+        )
+        self.entry_diretorio.grid(row=0, column=4, sticky="ew", padx=(0, 8))
+        inner_frame2.grid_columnconfigure(4, weight=1)
+
+        ctk.CTkButton(
+            inner_frame2, text="Selecionar", command=self.selecionar_diretorio,
+            width=80, height=32, font=ctk.CTkFont(size=11),
+            fg_color=self.CORES['info'], hover_color="#2980B9"
+        ).grid(row=0, column=5)
+
     def criar_painel_estatisticas(self, parent):
         """Cria o painel de estatísticas"""
         stats_frame = ctk.CTkFrame(parent, fg_color=self.CORES['fundo_card'], corner_radius=8)
@@ -431,6 +475,30 @@ class AutomacaoGUI:
             fg_color=self.CORES['fundo_escuro'], corner_radius=6
         )
         self.preview_text.grid(row=1, column=0, sticky="nsew", padx=3, pady=(0, 3))
+
+    def selecionar_diretorio(self):
+        """Abre diálogo para selecionar diretório de salvamento dos PDFs"""
+        import subprocess
+        try:
+            # Usa PowerShell para abrir o diálogo de pasta nativo do Windows
+            # Isso evita conflitos com o event loop do customtkinter
+            script = (
+                "Add-Type -AssemblyName System.Windows.Forms; "
+                "$f = New-Object System.Windows.Forms.FolderBrowserDialog; "
+                "$f.Description = 'Selecione o diretório para salvar os PDFs'; "
+                "$f.ShowNewFolderButton = $true; "
+                "if ($f.ShowDialog() -eq 'OK') { $f.SelectedPath } else { '' }"
+            )
+            result = subprocess.run(
+                ["powershell", "-Command", script],
+                capture_output=True, text=True, timeout=120
+            )
+            diretorio = result.stdout.strip()
+            if diretorio:
+                self.diretorio_salvamento.set(diretorio)
+                self.adicionar_log(f"Diretório de salvamento: {diretorio}", logging.INFO, "info")
+        except Exception as e:
+            self.adicionar_log(f"Erro ao selecionar diretório: {e}", logging.ERROR, "erro")
 
     def selecionar_arquivo(self):
         """Abre diálogo para selecionar arquivo Excel"""
@@ -785,13 +853,13 @@ class AutomacaoGUI:
 
                 # Enviar notificação ao Discord via webhook
                 try:
-                    data_referencia = (datetime.now() + timedelta(days=1)).strftime("%d/%m/%Y")
-                    pasta_planilha = os.path.dirname(os.path.abspath(self.arquivo_excel.get()))
+                    data_referencia = self.periodo_referencia.get() or (datetime.now() + timedelta(days=1)).strftime("%d/%m/%Y")
+                    diretorio_pdfs = self.diretorio_salvamento.get() or os.path.dirname(os.path.abspath(self.arquivo_excel.get()))
                     mensagem = (
                         f"📋 **Contratos Admissionais Emitidos**\n\n"
-                        f"📅 **Data de referência:** {data_referencia}\n"
+                        f"📅 **Período de referência:** {data_referencia}\n"
                         f"📊 **Quantidade emitida:** {self.linhas_processadas}\n"
-                        f"📂 **Pasta da planilha:** `{pasta_planilha}`\n\n"
+                        f"📂 **Diretório dos PDFs:** `{diretorio_pdfs}`\n\n"
                         f"✅ Emissão finalizada com sucesso!"
                     )
                     webhook_url = os.getenv("DISCORD_WEBHOOK_URL")
@@ -1406,11 +1474,19 @@ class DominioAutomation:
 
             # Navegar até campo de nome do arquivo
             nome_pdf = str(row['Documento'])
-            self.log(f"📝 Nome do arquivo: {nome_pdf}")
+
+            # Se o usuário selecionou um diretório, usar caminho absoluto no campo de nome
+            diretorio = self.diretorio_salvamento.get()
+            if diretorio:
+                caminho_completo = os.path.join(diretorio, nome_pdf)
+                self.log(f"📝 Salvando em: {caminho_completo}")
+            else:
+                caminho_completo = nome_pdf
+                self.log(f"📝 Nome do arquivo: {nome_pdf}")
 
             time.sleep(0.2)
             name_field = save_window.child_window(auto_id="1148", class_name="Edit")
-            name_field.set_text(nome_pdf)
+            name_field.set_text(caminho_completo)
             time.sleep(0.3)
 
             if self.should_stop():
