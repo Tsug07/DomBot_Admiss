@@ -1476,7 +1476,7 @@ class DominioAutomation:
             nome_pdf = str(row['Documento'])
 
             # Se o usuário selecionou um diretório, usar caminho absoluto no campo de nome
-            diretorio = self.diretorio_salvamento.get()
+            diretorio = self.gui.diretorio_salvamento.get()
             if diretorio:
                 caminho_completo = os.path.join(diretorio, nome_pdf)
                 self.log(f"📝 Salvando em: {caminho_completo}")
