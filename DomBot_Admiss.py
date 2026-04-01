@@ -860,7 +860,8 @@ class AutomacaoGUI:
                         f"📅 **Período de referência:** {data_referencia}\n"
                         f"📊 **Quantidade emitida:** {self.linhas_processadas}\n"
                         f"📂 **Diretório dos PDFs:** `{diretorio_pdfs}`\n\n"
-                        f"✅ Emissão finalizada com sucesso!"
+                        f"✅ Emissão finalizada com sucesso!\n\n"
+                        f"<@&1299044385899548752>"
                     )
                     webhook_url = os.getenv("DISCORD_WEBHOOK_URL")
                     requests.post(webhook_url, json={"content": mensagem}, timeout=10)
