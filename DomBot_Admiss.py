@@ -1122,6 +1122,9 @@ class DominioAutomation:
                 return False
 
             self.log("📞 Solicitando troca de empresa (F8)")
+            self.main_window.set_focus()
+            if not self.smart_sleep(0.3):
+                return False
             send_keys('{F8}')
             if not self.smart_sleep(2):
                 return False
@@ -1162,6 +1165,9 @@ class DominioAutomation:
 
             self.log(f"🏢 Alterando para empresa: {empresa_num}")
 
+            troca_window.set_focus()
+            if not self.smart_sleep(0.3):
+                return False
             send_keys(empresa_num)
             if not self.smart_sleep(0.5):
                 return False
