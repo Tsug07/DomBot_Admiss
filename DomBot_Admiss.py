@@ -1441,6 +1441,29 @@ class DominioAutomation:
             self.log(f"❌ Erro no processamento do relatório admissional: {str(e)}")
             return False
 
+    def _find_save_window_hwnd(self) -> int:
+        """Retorna o hwnd da janela de salvamento de PDF, ou 0 se não encontrada."""
+        result = [0]
+        def callback(hwnd, _):
+            if win32gui.IsWindowVisible(hwnd):
+                try:
+                    if win32gui.GetClassName(hwnd) == "#32770":
+                        if win32gui.GetWindowText(hwnd) == "Salvar em PDF":
+                            result[0] = hwnd
+                            return False
+                        child = win32gui.FindWindowEx(hwnd, 0, "Static", "Salvar em:")
+                        if child:
+                            result[0] = hwnd
+                            return False
+                except Exception:
+                    pass
+            return True
+        try:
+            win32gui.EnumWindows(callback, None)
+        except Exception:
+            pass
+        return result[0]
+
     def salvar_pdf(self, row, linha_excel: int) -> bool:
         """Salva o relatório como PDF"""
         try:
@@ -1449,31 +1472,22 @@ class DominioAutomation:
 
             self.log("💾 Configurando salvamento do PDF")
 
-            save_window = self.main_window.child_window(
-                title="Salvar em PDF",
-                class_name="#32770"
-            )
-
-            if not save_window.exists():
-                # Fallback: procura janela de salvamento pelo elemento "Salvar em:" (AutomationId 1091)
+            # Busca a janela de salvamento pelo hwnd (pode ser top-level, não filha de main_window)
+            save_hwnd = self._find_save_window_hwnd()
+            if save_hwnd:
+                save_app = Application(backend="uia").connect(handle=save_hwnd)
+                save_window = save_app.window(handle=save_hwnd)
+            else:
+                # Fallback: tenta como filho de main_window
                 self.log("🔍 Procurando janela de salvamento alternativa...")
-                try:
-                    save_window = self.main_window.child_window(
-                        class_name="#32770",
-                        found_index=0
-                    )
-                    # Confirma que é a janela correta verificando o controle "Salvar em:"
-                    salvar_em_label = save_window.child_window(
-                        auto_id="1091",
-                        class_name="Static"
-                    )
-                    if not salvar_em_label.exists():
-                        self.log("❌ Janela de salvamento não encontrada")
-                        return False
-                    self.log("✅ Janela de salvamento encontrada via elemento 'Salvar em:'")
-                except Exception:
+                save_window = self.main_window.child_window(
+                    title="Salvar em PDF",
+                    class_name="#32770"
+                )
+                if not save_window.exists():
                     self.log("❌ Janela de salvamento não encontrada")
                     return False
+                self.log("✅ Janela de salvamento encontrada via child_window")
 
             if self.should_stop():
                 return False
@@ -1491,29 +1505,30 @@ class DominioAutomation:
                 caminho_completo = nome_pdf
                 self.log(f"📝 Nome do arquivo: {nome_pdf}")
 
+            time.sleep(0.5)
+
+            # O campo de nome já vem selecionado — foca a janela e digita diretamente
+            win32gui.SetForegroundWindow(save_hwnd)
             time.sleep(0.2)
-            name_field = save_window.child_window(auto_id="1148", class_name="Edit")
-            name_field.set_text(caminho_completo)
+            send_keys(caminho_completo, with_spaces=True)
             time.sleep(0.3)
 
             if self.should_stop():
                 return False
             self.check_pause()
 
-            # Salvar
+            # Confirmar com Enter
             self.log("💾 Salvando PDF")
-            button_salvar = save_window.child_window(auto_id="1", class_name="Button")
-            button_salvar.click_input()
+            send_keys('{ENTER}')
 
-            # Esperar janela de salvamento fechar
+            # Esperar janela de salvamento fechar (verifica via hwnd)
             if not self.wait_for_condition(
-                lambda: not save_window.exists() or not save_window.is_visible(),
-                timeout=15,
-                poll_interval=0.2,
+                lambda: not win32gui.IsWindow(save_hwnd) or not win32gui.IsWindowVisible(save_hwnd),
+                timeout=30,
+                poll_interval=0.3,
                 description="Aguardando salvamento do PDF"
             ):
-                self.log("⚠️ Timeout aguardando salvamento do PDF")
-                return False
+                self.log("⚠️ Timeout aguardando janela fechar, continuando mesmo assim")
 
             self.log(f"✅ PDF salvo: {nome_pdf}")
 
