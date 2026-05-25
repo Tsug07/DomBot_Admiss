@@ -14,6 +14,7 @@ from pywinauto.keyboard import send_keys
 from pywinauto import findwindows, timings
 import win32gui
 import win32con
+import ctypes
 import time
 import logging
 from datetime import datetime, timedelta
@@ -832,6 +833,7 @@ class AutomacaoGUI:
                         self.linhas_com_erro += 1
                         self.error_logger.error(f"Linha {linha_excel} - Empresa {row['Nº']} - {func_nome} - erro no processamento")
                         self.adicionar_log(f"Erro na linha {linha_excel}", logging.ERROR, "erro")
+                        time.sleep(2)  # aguarda sistema estabilizar antes de processar próxima linha
 
                     self.atualizar_estatisticas()
 
@@ -940,6 +942,18 @@ class DominioAutomation:
         if description:
             self.log(f"{description} - timeout apos {timeout}s")
         return False
+
+    def _force_focus(self, hwnd: int):
+        """Força foco para uma janela contornando a restrição do Windows 10."""
+        try:
+            # Simula um pressionamento de Alt para desbloquear SetForegroundWindow
+            ctypes.windll.user32.keybd_event(0x12, 0, 0, 0)
+            ctypes.windll.user32.keybd_event(0x12, 0, 2, 0)
+            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+            win32gui.SetForegroundWindow(hwnd)
+            time.sleep(0.3)
+        except Exception:
+            pass
 
     def _window_exists(self, title: str, class_name: str) -> bool:
         """Verifica se janela com título/classe existe via win32gui."""
@@ -1165,13 +1179,47 @@ class DominioAutomation:
 
             self.log(f"🏢 Alterando para empresa: {empresa_num}")
 
-            troca_window.set_focus()
+            # Resolve o wrapper antes de acessar o handle
+            troca_wrapper = troca_window.wrapper_object()
+            troca_hwnd = troca_wrapper.handle
+
+            self._force_focus(troca_hwnd)
             if not self.smart_sleep(0.3):
                 return False
-            send_keys(empresa_num)
-            if not self.smart_sleep(0.5):
-                return False
-            send_keys('{ENTER}')
+
+            # Tenta localizar o campo Edit e preencher com set_focus + type_keys (mais confiável no Domínio)
+            edit_hwnd = win32gui.FindWindowEx(troca_hwnd, 0, "Edit", None)
+            if edit_hwnd:
+                self.log("🖊️ Campo encontrado, preenchendo via pywinauto type_keys")
+                try:
+                    edit_wrapper = self.app.window(handle=edit_hwnd)
+                    edit_wrapper.set_focus()
+                    time.sleep(0.2)
+                    # Limpa conteúdo atual e digita o número da empresa
+                    edit_wrapper.type_keys('^a', with_spaces=False)
+                    edit_wrapper.type_keys(empresa_num, with_spaces=False)
+                    time.sleep(0.3)
+                    edit_wrapper.type_keys('{ENTER}', with_spaces=False)
+                except Exception:
+                    # Fallback: send_keys direto na janela com foco
+                    self.log("⚠️ Fallback para send_keys no campo Edit")
+                    win32gui.SetForegroundWindow(edit_hwnd)
+                    time.sleep(0.2)
+                    send_keys('^a')
+                    send_keys(empresa_num)
+                    time.sleep(0.3)
+                    send_keys('{ENTER}')
+            else:
+                self.log("⚠️ Campo Edit não encontrado, usando send_keys na janela")
+                troca_wrapper.set_focus()
+                if not self.smart_sleep(0.3):
+                    return False
+                send_keys('^a')
+                send_keys(empresa_num)
+                if not self.smart_sleep(0.3):
+                    return False
+                send_keys('{ENTER}')
+
             if not self.smart_sleep(1.5):
                 return False
 
@@ -1495,8 +1543,11 @@ class DominioAutomation:
 
             # Navegar até campo de nome do arquivo
             nome_pdf = str(row['Documento'])
+            # Remove apenas caracteres inválidos em nomes de arquivo (não inclui '\' e ':' pois são do diretório)
+            for ch in r'*?"<>|':
+                nome_pdf = nome_pdf.replace(ch, '-')
 
-            # Se o usuário selecionou um diretório, usar caminho absoluto no campo de nome
+            # Se o usuário selecionou um diretório, montar caminho absoluto separando diretório do nome
             diretorio = self.gui.diretorio_salvamento.get()
             if diretorio:
                 caminho_completo = os.path.join(diretorio, nome_pdf)
@@ -1507,10 +1558,17 @@ class DominioAutomation:
 
             time.sleep(0.5)
 
-            # O campo de nome já vem selecionado — foca a janela e digita diretamente
-            win32gui.SetForegroundWindow(save_hwnd)
-            time.sleep(0.2)
-            send_keys(caminho_completo, with_spaces=True)
+            # Coloca o caminho diretamente no campo de nome via WM_SETTEXT (evita
+            # que send_keys interprete '\', caracteres acentuados ou '-' como teclas especiais)
+            self._force_focus(save_hwnd)
+            filename_edit = win32gui.FindWindowEx(save_hwnd, 0, "Edit", None)
+            if filename_edit:
+                win32gui.SendMessage(filename_edit, win32con.WM_SETTEXT, 0, caminho_completo)
+                time.sleep(0.2)
+            else:
+                # Fallback: seleciona tudo e digita (caminho sem caracteres especiais de controle)
+                send_keys('^a')
+                send_keys(caminho_completo, with_spaces=True)
             time.sleep(0.3)
 
             if self.should_stop():
@@ -1682,7 +1740,11 @@ class DominioAutomation:
         try:
             self.log("🧹 Limpando janelas")
 
-            self.main_window.set_focus()
+            try:
+                main_hwnd = self.main_window.handle
+                self._force_focus(main_hwnd)
+            except Exception:
+                pass
 
             for _ in range(4):
                 send_keys('{ESC}')
@@ -1701,6 +1763,8 @@ class DominioAutomation:
                     time.sleep(0.5)
             except Exception:
                 pass
+
+            time.sleep(1)
 
         except Exception as e:
             self.log(f"⚠️ Erro durante limpeza: {str(e)}")
