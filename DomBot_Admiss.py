@@ -1590,6 +1590,9 @@ class DominioAutomation:
 
             self.log(f"✅ PDF salvo: {nome_pdf}")
 
+            # Aguarda o sistema de arquivos confirmar a gravação antes de continuar
+            time.sleep(5.0)
+
             # Limpar janelas para próxima iteração
             self.cleanup_windows()
 
