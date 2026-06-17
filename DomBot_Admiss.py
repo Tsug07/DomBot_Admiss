@@ -21,6 +21,8 @@ from datetime import datetime, timedelta
 import os
 import requests
 from dotenv import load_dotenv
+from pathlib import Path
+from pdf_corrigir_spans import corrigir_pdf
 
 load_dotenv()
 import traceback
@@ -1592,6 +1594,21 @@ class DominioAutomation:
 
             # Aguarda o sistema de arquivos confirmar a gravação antes de continuar
             time.sleep(5.0)
+
+            # Corrige spans fragmentados (nomes justificados espalhados em múltiplos spans)
+            if diretorio and caminho_completo:
+                try:
+                    pdf_path = Path(caminho_completo)
+                    if not pdf_path.suffix:
+                        pdf_path = pdf_path.with_suffix(".pdf")
+                    if pdf_path.exists():
+                        stats = corrigir_pdf(pdf_path, output_path=pdf_path)
+                        if stats["fragmentadas"] > 0:
+                            self.log(f"🔧 Spans corrigidos: {stats['corrigidas']} linha(s) consolidada(s)")
+                        else:
+                            self.log("📄 PDF sem fragmentação de spans")
+                except Exception as e_corr:
+                    self.log(f"⚠️ Correção de spans falhou (PDF mantido): {e_corr}")
 
             # Limpar janelas para próxima iteração
             self.cleanup_windows()
