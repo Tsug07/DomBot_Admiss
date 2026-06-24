@@ -1596,7 +1596,7 @@ class DominioAutomation:
             time.sleep(5.0)
 
             # Corrige spans fragmentados (nomes justificados espalhados em múltiplos spans)
-            if diretorio and caminho_completo:
+            if caminho_completo:
                 try:
                     pdf_path = Path(caminho_completo)
                     if not pdf_path.suffix:
