@@ -17,6 +17,7 @@ import win32con
 import ctypes
 import time
 import logging
+import json
 from datetime import datetime, timedelta
 import os
 import requests
@@ -27,9 +28,18 @@ from pdf_corrigir_spans import corrigir_pdf
 load_dotenv()
 import traceback
 import threading
+import sys
+from importlib import util as _importlib_util
 from typing import Optional, Tuple
 import tkinter.messagebox as messagebox
 from PIL import Image, ImageDraw
+
+# Importa M.E.G_ONE (projeto separado) por caminho de arquivo, pois o nome
+# "M.E.G_ONE.py" contém pontos e não pode ser importado como módulo normal.
+_MEG_ONE_PATH = r"C:\Users\Canella e Santos\Desktop\Hugo\RPA\MEG_ONE\M.E.G_ONE.py"
+_meg_one_spec = _importlib_util.spec_from_file_location("meg_one", _MEG_ONE_PATH)
+meg_one = _importlib_util.module_from_spec(_meg_one_spec)
+_meg_one_spec.loader.exec_module(meg_one)
 
 
 class GUILogHandler(logging.Handler):
@@ -76,6 +86,12 @@ class AutomacaoGUI:
         self.pausa_solicitada = False
         self.thread_automacao = None
 
+        # Flags do dashboard de revisão do Excel principal (Meg_One)
+        self.aguardando_revisao_dashboard = False
+        self.revisao_cancelada = False
+        self.caminho_excel_revisado = None
+        self.usar_relatorios_existentes = ctk.BooleanVar(value=False)
+
         # Estatísticas
         self.stats = {
             'processados': 0,
@@ -101,7 +117,6 @@ class AutomacaoGUI:
 
         # Variáveis da interface
         self.arquivo_excel = ctk.StringVar()
-        self.linha_inicial = ctk.StringVar(value="2")
         self.periodo_referencia = ctk.StringVar(value=(datetime.now() + timedelta(days=1)).strftime("%d/%m/%Y"))
         self.diretorio_salvamento = ctk.StringVar()
         self.status_var = ctk.StringVar(value="Aguardando início...")
@@ -254,58 +269,27 @@ class AutomacaoGUI:
         inner_frame.grid(row=0, column=0, sticky="ew", padx=10, pady=8)
         inner_frame.grid_columnconfigure(1, weight=1)
 
-        # Arquivo Excel
-        ctk.CTkLabel(
-            inner_frame, text="📁", font=ctk.CTkFont(size=14)
-        ).grid(row=0, column=0, padx=(0, 5))
-
-        self.entry_arquivo = ctk.CTkEntry(
-            inner_frame,
-            textvariable=self.arquivo_excel,
-            placeholder_text="Selecione o arquivo Excel...",
-            height=32,
-            font=ctk.CTkFont(size=11)
-        )
-        self.entry_arquivo.grid(row=0, column=1, sticky="ew", padx=(0, 8))
-
-        ctk.CTkButton(
-            inner_frame, text="Procurar", command=self.selecionar_arquivo,
-            width=80, height=32, font=ctk.CTkFont(size=11),
-            fg_color=self.CORES['info'], hover_color="#2980B9"
-        ).grid(row=0, column=2, padx=(0, 15))
-
-        # Linha inicial
-        ctk.CTkLabel(
-            inner_frame, text="Linha:", font=ctk.CTkFont(size=11), text_color="#BDC3C7"
-        ).grid(row=0, column=3, padx=(0, 3))
-
-        self.entry_linha = ctk.CTkEntry(
-            inner_frame, textvariable=self.linha_inicial,
-            width=50, height=32, font=ctk.CTkFont(size=11), justify="center"
-        )
-        self.entry_linha.grid(row=0, column=4, padx=(0, 15))
-
         # Botões de controle
         self.btn_iniciar = ctk.CTkButton(
             inner_frame, text="▶ Iniciar", command=self.iniciar_automacao_thread,
             width=90, height=32, font=ctk.CTkFont(size=11, weight="bold"),
             fg_color=self.CORES['sucesso'], hover_color="#27AE60"
         )
-        self.btn_iniciar.grid(row=0, column=5, padx=3)
+        self.btn_iniciar.grid(row=0, column=0, padx=3)
 
         self.btn_pausar = ctk.CTkButton(
             inner_frame, text="⏸ Pausar", command=self.pausar_automacao,
             width=90, height=32, font=ctk.CTkFont(size=11, weight="bold"),
             fg_color=self.CORES['aviso'], hover_color="#E67E22", state="disabled"
         )
-        self.btn_pausar.grid(row=0, column=6, padx=3)
+        self.btn_pausar.grid(row=0, column=1, padx=3)
 
         self.btn_parar = ctk.CTkButton(
             inner_frame, text="⏹ Parar", command=self.parar_automacao,
             width=90, height=32, font=ctk.CTkFont(size=11, weight="bold"),
             fg_color=self.CORES['erro'], hover_color="#C0392B", state="disabled"
         )
-        self.btn_parar.grid(row=0, column=7, padx=(3, 0))
+        self.btn_parar.grid(row=0, column=2, padx=(3, 0))
 
         # Segunda linha — Período de referência e Diretório de salvamento
         inner_frame2 = ctk.CTkFrame(config_frame, fg_color="transparent")
@@ -348,6 +332,15 @@ class AutomacaoGUI:
             width=80, height=32, font=ctk.CTkFont(size=11),
             fg_color=self.CORES['info'], hover_color="#2980B9"
         ).grid(row=0, column=5)
+
+        # Checkbox: pular geração dos relatórios Empregados/Contrato
+        self.check_usar_existentes = ctk.CTkCheckBox(
+            inner_frame2,
+            text="Usar relatórios já existentes (pular Empregados/Contrato)",
+            variable=self.usar_relatorios_existentes,
+            font=ctk.CTkFont(size=11)
+        )
+        self.check_usar_existentes.grid(row=1, column=0, columnspan=6, sticky="w", pady=(8, 0))
 
     def criar_painel_estatisticas(self, parent):
         """Cria o painel de estatísticas"""
@@ -410,9 +403,11 @@ class AutomacaoGUI:
 
         tab_logs = self.tabview.add("📋 Logs")
         tab_preview = self.tabview.add("📊 Preview")
+        tab_nao_emitir = self.tabview.add("🚫 Não Emitir")
 
         self.criar_aba_logs(tab_logs)
         self.criar_aba_preview(tab_preview)
+        self.criar_aba_nao_emitir(tab_nao_emitir)
 
     def criar_aba_logs(self, parent):
         """Cria a aba de logs"""
@@ -473,11 +468,91 @@ class AutomacaoGUI:
             fg_color="#34495E", hover_color="#2C3E50"
         ).pack(side="right")
 
+        ctk.CTkButton(
+            info_frame, text="📁 Abrir arquivo", command=self.selecionar_arquivo,
+            width=100, height=24, font=ctk.CTkFont(size=10),
+            fg_color=self.CORES['info'], hover_color="#2980B9"
+        ).pack(side="right", padx=(0, 8))
+
         self.preview_text = ctk.CTkTextbox(
             parent, font=ctk.CTkFont(family="Consolas", size=10),
             fg_color=self.CORES['fundo_escuro'], corner_radius=6
         )
         self.preview_text.grid(row=1, column=0, sticky="nsew", padx=3, pady=(0, 3))
+
+    def criar_aba_nao_emitir(self, parent):
+        """Cria a aba de gerenciamento da lista de empresas que nunca devem
+        ser emitidas automaticamente (ex: Criat, contrato tratado manualmente)."""
+        parent.grid_columnconfigure(0, weight=1)
+        parent.grid_rowconfigure(1, weight=1)
+
+        info_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        info_frame.grid(row=0, column=0, sticky="ew", padx=3, pady=3)
+
+        ctk.CTkLabel(
+            info_frame,
+            text="Empresas cujo nome contenha um destes termos nunca serão emitidas (comparação parcial, sem diferenciar maiúsculas).",
+            font=ctk.CTkFont(size=10), text_color="#95A5A6"
+        ).pack(side="left")
+
+        add_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        add_frame.grid(row=1, column=0, sticky="ew", padx=3, pady=(0, 5))
+        add_frame.grid_columnconfigure(0, weight=1)
+
+        self.entry_nao_emitir = ctk.CTkEntry(
+            add_frame, placeholder_text="Nome ou trecho do nome da empresa (ex: CRIAT)",
+            height=28, font=ctk.CTkFont(size=11)
+        )
+        self.entry_nao_emitir.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+
+        ctk.CTkButton(
+            add_frame, text="Adicionar", command=self._adicionar_termo_nao_emitir,
+            width=90, height=28, font=ctk.CTkFont(size=11),
+            fg_color=self.CORES['sucesso'], hover_color="#27AE60"
+        ).grid(row=0, column=1)
+
+        self.lista_nao_emitir_frame = ctk.CTkScrollableFrame(parent, fg_color=self.CORES['fundo_escuro'])
+        self.lista_nao_emitir_frame.grid(row=2, column=0, sticky="nsew", padx=3, pady=(0, 3))
+        parent.grid_rowconfigure(2, weight=1)
+
+        self._renderizar_lista_nao_emitir()
+
+    def _renderizar_lista_nao_emitir(self):
+        """Redesenha a lista de termos na aba 'Não Emitir' a partir do arquivo."""
+        for widget in self.lista_nao_emitir_frame.winfo_children():
+            widget.destroy()
+
+        lista = self.carregar_lista_nao_emitir()
+        for i, termo in enumerate(lista):
+            linha = ctk.CTkFrame(self.lista_nao_emitir_frame, fg_color="transparent")
+            linha.pack(fill="x", pady=2, padx=2)
+
+            ctk.CTkLabel(linha, text=termo, font=ctk.CTkFont(size=11)).pack(side="left", padx=(4, 0))
+
+            ctk.CTkButton(
+                linha, text="Remover", width=70, height=22, font=ctk.CTkFont(size=9),
+                fg_color=self.CORES['erro'], hover_color="#C0392B",
+                command=lambda t=termo: self._remover_termo_nao_emitir(t)
+            ).pack(side="right")
+
+    def _adicionar_termo_nao_emitir(self):
+        termo = self.entry_nao_emitir.get().strip()
+        if not termo:
+            return
+        lista = self.carregar_lista_nao_emitir()
+        if termo.upper() not in [t.upper() for t in lista]:
+            lista.append(termo)
+            self.salvar_lista_nao_emitir(lista)
+            self.adicionar_log(f"Adicionado à lista de não emitir: '{termo}'", logging.INFO, "info")
+        self.entry_nao_emitir.delete(0, "end")
+        self._renderizar_lista_nao_emitir()
+
+    def _remover_termo_nao_emitir(self, termo: str):
+        lista = self.carregar_lista_nao_emitir()
+        lista = [t for t in lista if t != termo]
+        self.salvar_lista_nao_emitir(lista)
+        self.adicionar_log(f"Removido da lista de não emitir: '{termo}'", logging.INFO, "info")
+        self._renderizar_lista_nao_emitir()
 
     def selecionar_diretorio(self):
         """Abre diálogo para selecionar diretório de salvamento dos PDFs"""
@@ -650,47 +725,27 @@ class AutomacaoGUI:
             pass
 
     def validar_entrada(self) -> Tuple[bool, str]:
-        """Valida os dados de entrada"""
-        if not self.arquivo_excel.get():
-            return False, "Selecione um arquivo Excel"
+        """Valida os dados de entrada. O Excel principal é gerado automaticamente
+        pela automação (Empregados/Contrato -> Meg_One -> dashboard de revisão),
+        então não é validado aqui — só os campos conhecidos antes de iniciar."""
+        if not self.diretorio_salvamento.get():
+            return False, "Selecione o diretório de salvamento"
 
-        if not os.path.exists(self.arquivo_excel.get()):
-            return False, "Arquivo Excel não encontrado"
-
-        try:
-            linha_inicial = int(self.linha_inicial.get())
-            if linha_inicial < 1:
-                return False, "Linha inicial deve ser maior que 0"
-        except ValueError:
-            return False, "Linha inicial deve ser um número válido"
-
-        # Validar se o arquivo pode ser lido
-        try:
-            df = pd.read_excel(self.arquivo_excel.get())
-            if len(df) == 0:
-                return False, "Arquivo Excel está vazio"
-
-            if linha_inicial > len(df) + 1:
-                return False, f"Linha inicial ({linha_inicial}) é maior que o total de linhas do arquivo ({len(df) + 1})"
-
-            # Verificar colunas obrigatórias
-            colunas_necessarias = ['Nº', 'Cod.Funcionário', 'Tipo de Contrato', 'Documento']
-            colunas_faltando = [col for col in colunas_necessarias if col not in df.columns]
-
-            if colunas_faltando:
-                return False, f"Colunas obrigatórias não encontradas: {', '.join(colunas_faltando)}"
-
-            # Validar valores de Tipo de Contrato
-            tipos_validos = ['E', 'I']
-            tipos_invalidos = df['Tipo de Contrato'].dropna().apply(
-                lambda x: str(x).strip().upper()
-            ).loc[lambda x: ~x.isin(tipos_validos)]
-
-            if len(tipos_invalidos) > 0:
-                return False, f"Tipo de Contrato inválido encontrado. Use 'E' (Experiência) ou 'I' (Indeterminado)"
-
-        except Exception as e:
-            return False, f"Erro ao ler arquivo Excel: {str(e)}"
+        if self.usar_relatorios_existentes.get():
+            diretorio = self.obter_pasta_dia()
+            pasta_excels = os.path.join(diretorio, "Excels Base")
+            data_ref = datetime.now().strftime("%Y-%m-%d")
+            try:
+                ref = datetime.strptime(self.periodo_referencia.get().strip(), "%d/%m/%Y")
+                data_ref = ref.strftime("%Y-%m-%d")
+            except Exception:
+                pass
+            caminho_empregados = os.path.join(pasta_excels, f"Empregados_Admissao_{data_ref}.xls")
+            caminho_contrato = os.path.join(pasta_excels, f"ContratoPrazoDeterminado_{data_ref}.xls")
+            if not os.path.exists(caminho_empregados):
+                return False, f"Relatório de Empregados não encontrado: {caminho_empregados}"
+            if not os.path.exists(caminho_contrato):
+                return False, f"Relatório de Contrato não encontrado: {caminho_contrato}"
 
         return True, "Validação OK"
 
@@ -763,26 +818,270 @@ class AutomacaoGUI:
         else:
             self.window.destroy()
 
+    def obter_pasta_dia(self) -> str:
+        """Retorna o caminho da pasta do dia (dd.mm.aa) dentro do diretório raiz
+        selecionado, criando-a (e a subpasta 'Excels Base') se não existir."""
+        raiz = self.diretorio_salvamento.get()
+        try:
+            ref = datetime.strptime(self.periodo_referencia.get().strip(), "%d/%m/%Y")
+        except Exception:
+            ref = datetime.now()
+        pasta_dia = os.path.join(raiz, ref.strftime("%d.%m.%y"))
+        os.makedirs(os.path.join(pasta_dia, "Excels Base"), exist_ok=True)
+        return pasta_dia
+
+    def _caminho_lista_nao_emitir(self) -> str:
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), "nao_emitir.json")
+
+    def carregar_lista_nao_emitir(self) -> list:
+        """Lê a lista de nomes de empresa que nunca devem ser emitidos
+        (ex: 'CRIAT', tratada manualmente por outra equipe). Cria o arquivo
+        com valor padrão se ainda não existir."""
+        caminho = self._caminho_lista_nao_emitir()
+        if not os.path.exists(caminho):
+            padrao = ["CRIAT"]
+            self.salvar_lista_nao_emitir(padrao)
+            return padrao
+        try:
+            with open(caminho, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return []
+
+    def salvar_lista_nao_emitir(self, lista: list) -> None:
+        caminho = self._caminho_lista_nao_emitir()
+        with open(caminho, "w", encoding="utf-8") as f:
+            json.dump(lista, f, ensure_ascii=False, indent=2)
+
+    def filtrar_nao_emitir(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Remove linhas cuja EMPRESAS contenha (case-insensitive) algum termo
+        da lista de não emitir. Loga cada exclusão para o usuário saber que
+        foi intencional, não erro."""
+        lista = self.carregar_lista_nao_emitir()
+        if not lista or 'EMPRESAS' not in df.columns:
+            return df
+
+        mascara_excluir = pd.Series(False, index=df.index)
+        for termo in lista:
+            termo = termo.strip()
+            if not termo:
+                continue
+            mascara_termo = df['EMPRESAS'].astype(str).str.contains(termo, case=False, regex=False, na=False)
+            for empresa in df.loc[mascara_termo, 'EMPRESAS'].unique():
+                self.adicionar_log(f"🚫 Empresa '{empresa}' está na lista de não emitir — ignorada", logging.WARNING, "aviso")
+            mascara_excluir |= mascara_termo
+
+        return df[~mascara_excluir].reset_index(drop=True)
+
+    def gerar_excel_principal_meg_one(self) -> Optional[str]:
+        """Chama processar_dombot_admiss (M.E.G_ONE) usando os 2 relatórios já
+        gerados (Empregados e Contrato por Prazo Determinado) para montar o Excel
+        principal de entrada do loop de emissão. Retorna o caminho gerado, ou None em erro."""
+        try:
+            if not self.diretorio_salvamento.get():
+                self.adicionar_log("Diretório de salvamento não definido — necessário para localizar os relatórios", logging.ERROR, "erro")
+                return None
+
+            diretorio = self.obter_pasta_dia()
+            pasta_excels = os.path.join(diretorio, "Excels Base")
+
+            ref = datetime.strptime(self.periodo_referencia.get().strip(), "%d/%m/%Y")
+            data_ref = ref.strftime("%Y-%m-%d")
+            periodo_meg_one = ref.strftime("%d.%m.%y")
+
+            caminho_empregados = os.path.join(pasta_excels, f"Empregados_Admissao_{data_ref}.xls")
+            caminho_contrato = os.path.join(pasta_excels, f"ContratoPrazoDeterminado_{data_ref}.xls")
+
+            if not os.path.exists(caminho_empregados):
+                self.adicionar_log(f"Relatório de Empregados não encontrado: {caminho_empregados}", logging.ERROR, "erro")
+                return None
+            if not os.path.exists(caminho_contrato):
+                self.adicionar_log(f"Relatório de Contrato não encontrado: {caminho_contrato}", logging.ERROR, "erro")
+                return None
+
+            excel_saida = os.path.join(pasta_excels, f"ExcelPrincipal_{data_ref}.xlsx")
+
+            total = meg_one.processar_dombot_admiss(
+                caminho_empregados,
+                caminho_contrato,
+                excel_saida,
+                log_callback=lambda msg: self.adicionar_log(f"[Meg_One] {msg}", logging.INFO, "info"),
+                progress_callback=lambda p: None,
+                pasta_destino=diretorio,
+                periodo=periodo_meg_one,
+            )
+            self.adicionar_log(f"Meg_One gerou {total} registro(s) no Excel principal", logging.INFO, "info")
+            return excel_saida
+
+        except Exception as e:
+            self.adicionar_log(f"Erro ao gerar Excel principal via Meg_One: {str(e)}", logging.ERROR, "erro")
+            return None
+
+    def abrir_dashboard_revisao(self, caminho_excel: str):
+        """Abre a tela de revisão do Excel principal, permitindo corrigir o
+        código de empresa (Nº) de cada linha antes de liberar a emissão de
+        contratos. Roda na main thread (agendado via window.after)."""
+        try:
+            df = pd.read_excel(caminho_excel)
+        except Exception as e:
+            self.adicionar_log(f"Erro ao abrir Excel para revisão: {str(e)}", logging.ERROR, "erro")
+            self.revisao_cancelada = True
+            self.aguardando_revisao_dashboard = False
+            return
+
+        janela = ctk.CTkToplevel(self.window)
+        janela.title("Revisão do Excel Principal")
+        janela.geometry("1250x650")
+        janela.grab_set()
+
+        def on_close():
+            if messagebox.askyesno("Cancelar", "Cancelar a automação? Nenhum contrato será emitido."):
+                self.revisao_cancelada = True
+                self.aguardando_revisao_dashboard = False
+                janela.destroy()
+
+        janela.protocol("WM_DELETE_WINDOW", on_close)
+
+        def checar_parada():
+            if not self.executando:
+                janela.destroy()
+                return
+            janela.after(500, checar_parada)
+        janela.after(500, checar_parada)
+
+        aviso = ctk.CTkLabel(
+            janela,
+            text="Revise o código (Nº) de cada empresa antes de continuar. Linhas em vermelho ficaram sem código "
+                 "(ambíguas — preencha ou remova). Use 'Remover' para excluir linhas que não devem ser emitidas "
+                 "(ex: contrato tratado manualmente por outra equipe).",
+            font=ctk.CTkFont(size=11), text_color=self.CORES['aviso'], wraplength=860
+        )
+        aviso.pack(fill="x", padx=10, pady=(10, 5))
+
+        scroll = ctk.CTkScrollableFrame(janela)
+        scroll.pack(fill="both", expand=True, padx=10, pady=5)
+
+        colunas = ['Nº', 'EMPRESAS', 'Cod.Funcionário', 'Funcionário', 'Tipo de Contrato', 'Documento']
+        for c, nome_col in enumerate(colunas):
+            ctk.CTkLabel(scroll, text=nome_col, font=ctk.CTkFont(size=11, weight="bold")).grid(
+                row=0, column=c, padx=4, pady=4, sticky="w"
+            )
+        ctk.CTkLabel(scroll, text="", font=ctk.CTkFont(size=11, weight="bold")).grid(
+            row=0, column=len(colunas), padx=4, pady=4, sticky="w"
+        )
+
+        linhas_removidas = set()
+        entries_numero = {}
+        linha_widgets = {}
+
+        def remover_linha(idx_df):
+            linhas_removidas.add(idx_df)
+            for widget in linha_widgets[idx_df]:
+                widget.configure(state="disabled")
+                try:
+                    widget.configure(text_color="gray50")
+                except Exception:
+                    pass
+
+        def formatar_numero(valor):
+            """Formata o código de empresa sem .0 (colunas com célula vazia
+            viram float64 ao salvar/reler Excel, ex: 676 -> 676.0)."""
+            if pd.isna(valor) or str(valor).strip() == '':
+                return ""
+            try:
+                return str(int(float(valor)))
+            except (ValueError, TypeError):
+                return str(valor).strip()
+
+        for i, (idx_df, row) in enumerate(df.iterrows(), start=1):
+            valor_numero = formatar_numero(row.get('Nº', ''))
+            ambigua = not valor_numero
+
+            entry = ctk.CTkEntry(scroll, width=70)
+            entry.insert(0, valor_numero)
+            if ambigua:
+                entry.configure(border_color=self.CORES['erro'])
+            entry.grid(row=i, column=0, padx=4, pady=2, sticky="w")
+            entries_numero[idx_df] = entry
+
+            widgets_linha = [entry]
+            for c, nome_col in enumerate(colunas[1:], start=1):
+                valor = "" if pd.isna(row.get(nome_col, '')) else str(row.get(nome_col, ''))
+                lbl = ctk.CTkLabel(scroll, text=valor, font=ctk.CTkFont(size=10))
+                lbl.grid(row=i, column=c, padx=4, pady=2, sticky="w")
+                widgets_linha.append(lbl)
+
+            btn_remover = ctk.CTkButton(
+                scroll, text="Remover", width=70, height=22, font=ctk.CTkFont(size=9),
+                fg_color=self.CORES['erro'], hover_color="#C0392B",
+                command=lambda i=idx_df: remover_linha(i)
+            )
+            btn_remover.grid(row=i, column=len(colunas), padx=4, pady=2, sticky="w")
+            widgets_linha.append(btn_remover)
+            linha_widgets[idx_df] = widgets_linha
+
+        botoes_frame = ctk.CTkFrame(janela, fg_color="transparent")
+        botoes_frame.pack(fill="x", padx=10, pady=10)
+
+        def continuar():
+            pendentes = [
+                idx_df for idx_df, entry in entries_numero.items()
+                if idx_df not in linhas_removidas and not entry.get().strip()
+            ]
+            if pendentes:
+                messagebox.showerror(
+                    "Linhas ambíguas pendentes",
+                    f"{len(pendentes)} linha(s) ainda estão sem código (Nº). "
+                    "Preencha o código ou clique em 'Remover' antes de continuar."
+                )
+                return
+
+            for idx_df, entry in entries_numero.items():
+                if idx_df in linhas_removidas:
+                    continue
+                valor = entry.get().strip()
+                if valor and not valor.isdigit():
+                    messagebox.showerror("Valor inválido", f"O código '{valor}' não é numérico. Corrija antes de continuar.")
+                    return
+
+            for idx_df, entry in entries_numero.items():
+                if idx_df not in linhas_removidas:
+                    df.at[idx_df, 'Nº'] = entry.get().strip()
+
+            df_final = df.drop(index=list(linhas_removidas))
+
+            pasta = os.path.dirname(caminho_excel)
+            base, _ = os.path.splitext(os.path.basename(caminho_excel))
+            caminho_revisado = os.path.join(pasta, f"{base}_revisado.xlsx")
+            df_final.to_excel(caminho_revisado, index=False)
+
+            self.caminho_excel_revisado = caminho_revisado
+            self.arquivo_excel.set(caminho_revisado)
+            self.carregar_preview()
+            self.aguardando_revisao_dashboard = False
+            janela.destroy()
+
+        def cancelar():
+            if messagebox.askyesno("Cancelar", "Cancelar a automação? Nenhum contrato será emitido."):
+                self.revisao_cancelada = True
+                self.aguardando_revisao_dashboard = False
+                janela.destroy()
+
+        ctk.CTkButton(
+            botoes_frame, text="Continuar", command=continuar,
+            fg_color=self.CORES['sucesso'], hover_color="#27AE60"
+        ).pack(side="right", padx=(5, 0))
+        ctk.CTkButton(
+            botoes_frame, text="Cancelar", command=cancelar,
+            fg_color=self.CORES['erro'], hover_color="#C0392B"
+        ).pack(side="right")
+
     def iniciar_automacao(self):
         """Método principal de automação"""
-        linha_inicial = int(self.linha_inicial.get())
-
         try:
             self.adicionar_log("Iniciando automação...", logging.INFO, "processando")
             self.status_var.set("Em execução...")
             self.executando = True
-
-            # Carregar Excel
-            df = pd.read_excel(self.arquivo_excel.get())
-
-            # Ajustar linha inicial para índice do DataFrame (linha 2 = índice 1)
-            inicio_indice = linha_inicial - 2
-            df_processar = df.iloc[inicio_indice:]
-
-            self.total_linhas = len(df_processar)
-            self.adicionar_log(f"Arquivo carregado: {self.total_linhas} linhas para processar", logging.INFO, "info")
-            self.adicionar_log(f"Iniciando da linha {linha_inicial} (índice {inicio_indice})", logging.INFO, "info")
-            self.total_label.configure(text=str(self.total_linhas))
 
             # Resetar barra de progresso
             self.progress_bar.set(0)
@@ -794,6 +1093,74 @@ class AutomacaoGUI:
             if not automacao.connect_to_dominio():
                 self.adicionar_log("Não foi possível conectar ao Domínio", logging.ERROR, "erro")
                 return
+
+            if self.usar_relatorios_existentes.get():
+                self.adicionar_log("Usando relatórios já existentes — pulando Empregados/Contrato", logging.INFO, "info")
+            else:
+                # Gerar relatório de Empregados (Admissão) em Excel — roda uma vez, antes do loop
+                self.adicionar_log("Gerando relatório de Empregados (Admissão)...", logging.INFO, "processando")
+                if not automacao.processar_relatorio_empregados():
+                    self.adicionar_log("Falha ao gerar relatório de Empregados — abortando execução", logging.ERROR, "erro")
+                    return
+                self.adicionar_log("Relatório de Empregados gerado com sucesso", logging.INFO, "sucesso")
+
+                # Gerar relatório de Contrato por Prazo Determinado em Excel — roda uma vez, antes do loop
+                self.adicionar_log("Gerando relatório de Contrato por Prazo Determinado...", logging.INFO, "processando")
+                if not automacao.processar_contrato_prazo_determinado():
+                    self.adicionar_log("Falha ao gerar relatório de Contrato por Prazo Determinado — abortando execução", logging.ERROR, "erro")
+                    return
+                self.adicionar_log("Relatório de Contrato por Prazo Determinado gerado com sucesso", logging.INFO, "sucesso")
+
+            # Gerar Excel principal via Meg_One a partir dos dois relatórios
+            self.adicionar_log("Gerando Excel principal via Meg_One...", logging.INFO, "processando")
+            excel_principal = self.gerar_excel_principal_meg_one()
+            if not excel_principal:
+                self.adicionar_log("Falha ao gerar Excel principal via Meg_One — abortando execução", logging.ERROR, "erro")
+                return
+            self.adicionar_log(f"Excel principal gerado: {excel_principal}", logging.INFO, "sucesso")
+
+            # Remove empresas da lista de "não emitir" (ex: Criat, contrato
+            # tratado manualmente por outra equipe) antes de qualquer checagem.
+            try:
+                df_filtrado = pd.read_excel(excel_principal)
+                df_filtrado = self.filtrar_nao_emitir(df_filtrado)
+                df_filtrado.to_excel(excel_principal, index=False)
+            except Exception as e:
+                self.adicionar_log(f"Erro ao aplicar lista de não emitir: {str(e)}", logging.WARNING, "aviso")
+
+            # Só pausa para revisão manual se houver linha ambígua (Nº vazio) —
+            # caso contrário, segue direto para a emissão sem interromper o fluxo.
+            try:
+                df_check = pd.read_excel(excel_principal)
+                tem_ambiguidade = df_check['Nº'].isna().any() or (df_check['Nº'].astype(str).str.strip() == '').any()
+            except Exception:
+                tem_ambiguidade = True  # na dúvida, força revisão
+
+            if tem_ambiguidade:
+                self.adicionar_log("Linha(s) ambígua(s) detectada(s) — abrindo revisão do Excel principal", logging.WARNING, "aviso")
+                self.aguardando_revisao_dashboard = True
+                self.revisao_cancelada = False
+                self.caminho_excel_revisado = None
+                self.window.after(0, self.abrir_dashboard_revisao, excel_principal)
+
+                while self.aguardando_revisao_dashboard and self.executando:
+                    time.sleep(0.5)
+
+                if not self.executando or self.revisao_cancelada:
+                    self.adicionar_log("Automação cancelada na revisão do Excel principal", logging.INFO, "aviso")
+                    return
+
+                self.arquivo_excel.set(self.caminho_excel_revisado or excel_principal)
+            else:
+                self.arquivo_excel.set(excel_principal)
+
+            # Carregar Excel
+            df = pd.read_excel(self.arquivo_excel.get())
+            df_processar = df
+
+            self.total_linhas = len(df_processar)
+            self.adicionar_log(f"Arquivo carregado: {self.total_linhas} linhas para processar", logging.INFO, "info")
+            self.total_label.configure(text=str(self.total_linhas))
 
             # Processar linhas
             for idx, (original_index, row) in enumerate(df_processar.iterrows()):
@@ -813,6 +1180,18 @@ class AutomacaoGUI:
                 self.atualizar_progresso(idx + 1, self.total_linhas)
 
                 linha_excel = original_index + 2
+
+                # Linha sem código de empresa (não deveria chegar aqui — o dashboard
+                # de revisão exige preencher ou remover — mas pula defensivamente
+                # em vez de travar todo o loop com "cannot convert float NaN to integer")
+                if pd.isna(row['Nº']) or str(row['Nº']).strip() == '':
+                    self.linhas_puladas += 1
+                    self.adicionar_log(
+                        f"Linha {linha_excel} pulada: sem código de empresa (Nº vazio)",
+                        logging.WARNING, "aviso"
+                    )
+                    self.atualizar_estatisticas()
+                    continue
 
                 # Atualizar empresa no card
                 empresa_num = str(int(row['Nº']))
@@ -855,10 +1234,36 @@ class AutomacaoGUI:
                 self.adicionar_log("Automação concluída!", logging.INFO, "sucesso")
                 self.adicionar_log(f"Resumo: {self.linhas_processadas} processadas, {self.linhas_com_erro} com erro, {self.linhas_puladas} puladas", logging.INFO, "info")
 
+                # Corrige spans fragmentados em todos os PDFs da pasta do dia
+                try:
+                    pasta_pdfs = self.obter_pasta_dia() if self.diretorio_salvamento.get() else ""
+                    if pasta_pdfs and os.path.isdir(pasta_pdfs):
+                        pdfs = list(Path(pasta_pdfs).glob("*.pdf"))
+                        self.adicionar_log(f"Corrigindo spans em {len(pdfs)} PDF(s) da pasta...", logging.INFO, "info")
+                        total_corrigidas = 0
+                        total_com_fragmentacao = 0
+                        falhas = 0
+                        for pdf_path in pdfs:
+                            try:
+                                stats = corrigir_pdf(pdf_path, output_path=pdf_path)
+                                if stats["fragmentadas"] > 0:
+                                    total_com_fragmentacao += 1
+                                    total_corrigidas += stats["corrigidas"]
+                            except Exception as e_corr:
+                                falhas += 1
+                                self.error_logger.error(f"Correção de spans falhou em {pdf_path.name}: {e_corr}")
+                        self.adicionar_log(
+                            f"Correção de spans concluída: {total_com_fragmentacao} arquivo(s) corrigido(s) "
+                            f"({total_corrigidas} linha(s)), {falhas} falha(s)",
+                            logging.INFO, "sucesso" if falhas == 0 else "aviso"
+                        )
+                except Exception as e:
+                    self.adicionar_log(f"Erro ao corrigir spans na pasta: {str(e)}", logging.WARNING, "aviso")
+
                 # Enviar notificação ao Discord via webhook
                 try:
                     data_referencia = self.periodo_referencia.get() or (datetime.now() + timedelta(days=1)).strftime("%d/%m/%Y")
-                    diretorio_pdfs = self.diretorio_salvamento.get() or os.path.dirname(os.path.abspath(self.arquivo_excel.get()))
+                    diretorio_pdfs = self.obter_pasta_dia() if self.diretorio_salvamento.get() else os.path.dirname(os.path.abspath(self.arquivo_excel.get()))
                     mensagem = (
                         f"📋 **Contratos Admissionais Emitidos**\n\n"
                         f"📅 **Período de referência:** {data_referencia}\n"
@@ -945,13 +1350,33 @@ class DominioAutomation:
             self.log(f"{description} - timeout apos {timeout}s")
         return False
 
+    def calcular_periodo_mes_referencia(self) -> Tuple[str, str]:
+        """Retorna (data_inicio, data_fim) — ambas a mesma data do campo
+        self.gui.periodo_referencia (formato "%d/%m/%Y"), já que a automação
+        roda diariamente (uma execução por dia, não por mês). Em caso de erro
+        de parse, usa a data de hoje."""
+        valor = ""
+        try:
+            valor = self.gui.periodo_referencia.get()
+            ref = datetime.strptime(valor.strip(), "%d/%m/%Y")
+        except Exception:
+            self.log(f"⚠️ Não foi possível interpretar periodo_referencia ('{valor}'), usando data atual")
+            ref = datetime.now()
+
+        data = ref.strftime("%d/%m/%Y")
+        self.log(f"📅 Período de admissão: {data}")
+        return data, data
+
     def _force_focus(self, hwnd: int):
         """Força foco para uma janela contornando a restrição do Windows 10."""
         try:
             # Simula um pressionamento de Alt para desbloquear SetForegroundWindow
             ctypes.windll.user32.keybd_event(0x12, 0, 0, 0)
             ctypes.windll.user32.keybd_event(0x12, 0, 2, 0)
-            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+            # Só restaura se estiver minimizada — SW_RESTORE desmaximizaria uma
+            # janela já maximizada, encolhendo-a sem necessidade.
+            if win32gui.IsIconic(hwnd):
+                win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
             win32gui.SetForegroundWindow(hwnd)
             time.sleep(0.3)
         except Exception:
@@ -1514,6 +1939,45 @@ class DominioAutomation:
             pass
         return result[0]
 
+    def _save_excel_dialog_exists(self) -> bool:
+        """Verifica se o diálogo 'Selecione o arquivo' (exportação para Excel,
+        disparado pelo botão de Excel na barra lateral, não por Ctrl+D) está
+        visível. Confirmado: título exato 'Selecione o arquivo', combo Tipo
+        já vem pré-selecionado em 'Arquivos do Excel (*.xls)'."""
+        try:
+            result = [False]
+            def callback(hwnd, _):
+                if win32gui.IsWindowVisible(hwnd):
+                    try:
+                        if win32gui.GetClassName(hwnd) == "#32770" and win32gui.GetWindowText(hwnd) == "Selecione o arquivo":
+                            result[0] = True
+                            return False
+                    except Exception:
+                        pass
+                return True
+            win32gui.EnumWindows(callback, None)
+            return result[0]
+        except Exception:
+            return False
+
+    def _find_save_excel_window_hwnd(self) -> int:
+        """Retorna o hwnd do diálogo 'Selecione o arquivo', ou 0 se não encontrado."""
+        result = [0]
+        def callback(hwnd, _):
+            if win32gui.IsWindowVisible(hwnd):
+                try:
+                    if win32gui.GetClassName(hwnd) == "#32770" and win32gui.GetWindowText(hwnd) == "Selecione o arquivo":
+                        result[0] = hwnd
+                        return False
+                except Exception:
+                    pass
+            return True
+        try:
+            win32gui.EnumWindows(callback, None)
+        except Exception:
+            pass
+        return result[0]
+
     def salvar_pdf(self, row, linha_excel: int) -> bool:
         """Salva o relatório como PDF"""
         try:
@@ -1595,20 +2059,9 @@ class DominioAutomation:
             # Aguarda o sistema de arquivos confirmar a gravação antes de continuar
             time.sleep(5.0)
 
-            # Corrige spans fragmentados (nomes justificados espalhados em múltiplos spans)
-            if caminho_completo:
-                try:
-                    pdf_path = Path(caminho_completo)
-                    if not pdf_path.suffix:
-                        pdf_path = pdf_path.with_suffix(".pdf")
-                    if pdf_path.exists():
-                        stats = corrigir_pdf(pdf_path, output_path=pdf_path)
-                        if stats["fragmentadas"] > 0:
-                            self.log(f"🔧 Spans corrigidos: {stats['corrigidas']} linha(s) consolidada(s)")
-                        else:
-                            self.log("📄 PDF sem fragmentação de spans")
-                except Exception as e_corr:
-                    self.log(f"⚠️ Correção de spans falhou (PDF mantido): {e_corr}")
+            # Correção de spans fragmentados é feita em lote ao final de toda a
+            # emissão (ver corrigir_pasta_spans), não arquivo a arquivo aqui,
+            # pois logo após salvar o PDF pode ainda estar com lock do app de origem.
 
             # Limpar janelas para próxima iteração
             self.cleanup_windows()
@@ -1617,6 +2070,138 @@ class DominioAutomation:
 
         except Exception as e:
             self.log(f"❌ Erro ao salvar PDF: {str(e)}")
+            return False
+
+    def salvar_excel_empregados(self) -> bool:
+        """Salva o relatório de Empregados como Excel. Nome/local previsíveis
+        (para facilitar integração futura com Meg_One, fora de escopo aqui).
+        Extensão .xlsx assumida — confirmar na prática se o Domínio já adiciona
+        a extensão sozinho ou se precisa ser explícita no nome digitado."""
+        try:
+            if self.should_stop():
+                return False
+
+            self.log("💾 Configurando salvamento do Excel de Empregados")
+
+            save_hwnd = self._find_save_excel_window_hwnd()
+            if not save_hwnd:
+                self.log("❌ Janela de salvamento do Excel não encontrada")
+                return False
+
+            if self.should_stop():
+                return False
+            self.check_pause()
+
+            data_inicio, _ = self.calcular_periodo_mes_referencia()
+            mes_ano = datetime.strptime(data_inicio, "%d/%m/%Y").strftime("%Y-%m-%d")
+            nome_arquivo = f"Empregados_Admissao_{mes_ano}.xls"
+
+            diretorio = self.gui.obter_pasta_dia() if self.gui.diretorio_salvamento.get() else ""
+            if diretorio:
+                caminho_completo = os.path.join(diretorio, "Excels Base", nome_arquivo)
+            else:
+                caminho_completo = nome_arquivo
+            self.log(f"📝 Salvando relatório de Empregados em: {caminho_completo}")
+
+            time.sleep(0.5)
+            self._force_focus(save_hwnd)
+            filename_edit = win32gui.FindWindowEx(save_hwnd, 0, "Edit", None)
+            if filename_edit:
+                win32gui.SendMessage(filename_edit, win32con.WM_SETTEXT, 0, caminho_completo)
+                time.sleep(0.2)
+            else:
+                send_keys('^a')
+                send_keys(caminho_completo, with_spaces=True)
+            time.sleep(0.3)
+
+            if self.should_stop():
+                return False
+            self.check_pause()
+
+            self.log("💾 Salvando Excel de Empregados")
+            send_keys('{ENTER}')
+
+            if not self.wait_for_condition(
+                lambda: not win32gui.IsWindow(save_hwnd) or not win32gui.IsWindowVisible(save_hwnd),
+                timeout=60,
+                poll_interval=0.3,
+                description="Aguardando salvamento do Excel de Empregados"
+            ):
+                self.log("⚠️ Timeout aguardando janela do Excel fechar, continuando mesmo assim")
+
+            self.log(f"✅ Excel de Empregados salvo: {nome_arquivo}")
+            time.sleep(3.0)
+
+            self.cleanup_windows()
+            return True
+
+        except Exception as e:
+            self.log(f"❌ Erro ao salvar Excel de Empregados: {str(e)}")
+            return False
+
+    def salvar_excel_contrato_prazo_determinado(self) -> bool:
+        """Salva o relatório de Contrato por Prazo Determinado como Excel.
+        Mesma lógica de salvar_excel_empregados, mudando apenas o nome do arquivo."""
+        try:
+            if self.should_stop():
+                return False
+
+            self.log("💾 Configurando salvamento do Excel de Contrato por Prazo Determinado")
+
+            save_hwnd = self._find_save_excel_window_hwnd()
+            if not save_hwnd:
+                self.log("❌ Janela de salvamento do Excel não encontrada")
+                return False
+
+            if self.should_stop():
+                return False
+            self.check_pause()
+
+            data_inicio, _ = self.calcular_periodo_mes_referencia()
+            mes_ano = datetime.strptime(data_inicio, "%d/%m/%Y").strftime("%Y-%m-%d")
+            nome_arquivo = f"ContratoPrazoDeterminado_{mes_ano}.xls"
+
+            diretorio = self.gui.obter_pasta_dia() if self.gui.diretorio_salvamento.get() else ""
+            if diretorio:
+                caminho_completo = os.path.join(diretorio, "Excels Base", nome_arquivo)
+            else:
+                caminho_completo = nome_arquivo
+            self.log(f"📝 Salvando relatório de Contrato por Prazo Determinado em: {caminho_completo}")
+
+            time.sleep(0.5)
+            self._force_focus(save_hwnd)
+            filename_edit = win32gui.FindWindowEx(save_hwnd, 0, "Edit", None)
+            if filename_edit:
+                win32gui.SendMessage(filename_edit, win32con.WM_SETTEXT, 0, caminho_completo)
+                time.sleep(0.2)
+            else:
+                send_keys('^a')
+                send_keys(caminho_completo, with_spaces=True)
+            time.sleep(0.3)
+
+            if self.should_stop():
+                return False
+            self.check_pause()
+
+            self.log("💾 Salvando Excel de Contrato por Prazo Determinado")
+            send_keys('{ENTER}')
+
+            if not self.wait_for_condition(
+                lambda: not win32gui.IsWindow(save_hwnd) or not win32gui.IsWindowVisible(save_hwnd),
+                timeout=60,
+                poll_interval=0.3,
+                description="Aguardando salvamento do Excel de Contrato por Prazo Determinado"
+            ):
+                self.log("⚠️ Timeout aguardando janela do Excel fechar, continuando mesmo assim")
+
+            self.log(f"✅ Excel de Contrato por Prazo Determinado salvo: {nome_arquivo}")
+            time.sleep(3.0)
+
+            self.cleanup_windows()
+            return True
+
+        except Exception as e:
+            self.log(f"❌ Erro ao salvar Excel de Contrato por Prazo Determinado: {str(e)}")
             return False
 
     def handle_error_dialogs(self) -> bool:
@@ -1788,6 +2373,412 @@ class DominioAutomation:
 
         except Exception as e:
             self.log(f"⚠️ Erro durante limpeza: {str(e)}")
+
+    def processar_relatorio_empregados(self) -> bool:
+        """Gera o relatório de Empregados (filtro Admissão do mês de referência)
+        em Excel. Roda uma única vez, antes do loop de emissão de contratos.
+
+        ATENÇÃO: várias etapas abaixo são hipóteses (marcadas # INCERTEZA) que
+        precisam ser validadas rodando o robô com o Domínio Folha aberto e
+        ajustadas conforme o comportamento real observado nos logs."""
+        try:
+            if self.should_stop():
+                return False
+            self.check_pause()
+
+            # Fecha qualquer janela "Empregados" residual (ex: de uma tentativa
+            # anterior que falhou) para evitar ambiguidade ao localizar a nova.
+            for _ in range(5):
+                try:
+                    residual = self.main_window.child_window(title="Empregados", class_name="FNWND3190", found_index=0)
+                    if not residual.exists():
+                        break
+                    residual.close()
+                    time.sleep(0.5)
+                except Exception:
+                    break
+
+            # --- 1) Abrir janela "Empregados" ---
+            # Navegação confirmada pelo usuário: Alt+R (Relatórios) -> 'c' -> 'e' (Empregados).
+            self.log("📇 Acessando menu para abrir Empregados")
+            self.main_window.set_focus()
+            send_keys('%r')  # Alt+R
+            if not self.smart_sleep(0.5):
+                return False
+            send_keys('c')
+            if not self.smart_sleep(0.5):
+                return False
+            send_keys('e')  # Empregados
+            if not self.smart_sleep(0.5):
+                return False
+            send_keys('{ENTER}')
+            if not self.smart_sleep(1):
+                return False
+
+            max_attempts = 10
+            empregados_window = None
+            for attempt in range(max_attempts):
+                if self.should_stop():
+                    return False
+                self.check_pause()
+                try:
+                    # Pode haver mais de uma janela "Empregados" simultânea (ex: uma
+                    # residual de execução anterior) — pega a mais recente (topo, index 0).
+                    candidata = self.main_window.child_window(
+                        title="Empregados", class_name="FNWND3190", found_index=0
+                    )
+                    if candidata.exists():
+                        empregados_window = candidata
+                        break
+                    if not self.handle_error_dialogs():
+                        self.cleanup_windows()
+                        return False
+                    if not self.smart_sleep(1):
+                        return False
+                except Exception:
+                    if attempt == max_attempts - 1:
+                        self.log("❌ Janela Empregados não encontrada (timeout)")
+                        return False
+
+            if not empregados_window:
+                self.log("❌ Janela Empregados não encontrada")
+                return False
+            self.log("📇 Janela Empregados localizada")
+
+            if self.should_stop():
+                return False
+            self.check_pause()
+
+            # --- 2) Botão "Seleção..." ---
+            send_keys('%s')  # Alt+S
+            if not self.smart_sleep(0.8):
+                return False
+
+            # Janela top-level confirmada: título "Seleção de Empregados", classe FNWND3190.
+            selecao_window = self.main_window.child_window(
+                title="Seleção de Empregados", class_name="FNWND3190"
+            )
+            if not selecao_window.exists():
+                self.log("❌ Janela 'Seleção de Empregados' não encontrada")
+                return False
+
+            # --- 3) Aba "Adicional" ---
+            try:
+                tab_control = selecao_window.child_window(auto_id="1002", class_name="PBTabControl32_100")
+                tab_control.click_input(coords=(70, 10))  # coords aproximadas, ajustar se necessário
+                if not self.smart_sleep(0.5):
+                    return False
+            except Exception as e:
+                self.log(f"⚠️ Erro ao acessar aba Adicional: {str(e)}")
+                return False
+
+            # --- 4) Checkbox "Admissão:" ---
+            try:
+                cb_admissao = selecao_window.child_window(auto_id="1008", class_name="Button")
+                if not cb_admissao.get_toggle_state():
+                    cb_admissao.click_input()
+                    if not self.smart_sleep(0.3):
+                        return False
+                self.log("✅ Checkbox Admissão marcado")
+            except Exception as e:
+                self.log(f"❌ Erro ao marcar checkbox Admissão: {str(e)}")
+                return False
+
+            # --- 5/6) Datas Início/Fim ---
+            data_inicio, data_fim = self.calcular_periodo_mes_referencia()
+            try:
+                campo_inicio = selecao_window.child_window(auto_id="1009", class_name="PBEDIT190")
+                campo_inicio.click_input()
+                send_keys('^a')
+                send_keys(data_inicio)
+                if not self.smart_sleep(0.3):
+                    return False
+
+                campo_fim = selecao_window.child_window(auto_id="1010", class_name="PBEDIT190")
+                campo_fim.click_input()
+                send_keys('^a')
+                send_keys(data_fim)
+                if not self.smart_sleep(0.3):
+                    return False
+            except Exception as e:
+                self.log(f"❌ Erro ao preencher datas de admissão: {str(e)}")
+                return False
+
+            # --- 7) OK da janela de Seleção ---
+            send_keys('%o')  # Alt+O
+            if not self.smart_sleep(1):
+                return False
+            if not self.handle_error_dialogs():
+                self.cleanup_windows()
+                return False
+
+            # --- 8) Botão "Empresas..." ---
+            send_keys('%e')  # Alt+E
+            if not self.smart_sleep(0.8):
+                return False
+
+            # --- 9/10/11) Janela modal "Selecionar Empresas" ---
+            try:
+                empresas_window = self.main_window.child_window(class_name="FNWNS3190")
+                if not empresas_window.exists():
+                    self.log("❌ Janela Selecionar Empresas não encontrada")
+                    return False
+
+                btn_todas = empresas_window.child_window(auto_id="1006", class_name="Button")
+                btn_todas.click_input()
+                if not self.smart_sleep(0.3):
+                    return False
+
+                btn_ok_empresas = empresas_window.child_window(auto_id="1009", class_name="Button")
+                btn_ok_empresas.click_input()
+                if not self.smart_sleep(0.8):
+                    return False
+            except Exception as e:
+                self.log(f"❌ Erro ao selecionar empresas: {str(e)}")
+                return False
+
+            if not self.handle_error_dialogs():
+                self.cleanup_windows()
+                return False
+
+            # --- 12) "ok >> ok" final ---
+            # INCERTEZA: pode ser redundante com o OK acima de "Selecionar Empresas" —
+            # validar na prática se este Alt+O extra é necessário ou incorreto.
+            send_keys('%o')  # HIPÓTESE — validar na prática
+            if not self.smart_sleep(1):
+                return False
+
+            # --- 13) Clicar no ícone de exportar Excel (painel FNUDO3190, auto_id
+            # 1020, na barra lateral da janela Empregados) e aguardar o diálogo
+            # "Selecione o arquivo". Ctrl+D NÃO se aplica aqui — abre "Salvar em PDF".
+            if not self.smart_sleep(2):
+                return False
+            self.log("📊 Clicando no ícone de exportar Excel")
+            try:
+                btn_excel = empregados_window.child_window(
+                    auto_id="1020", class_name="FNUDO3190", found_index=0
+                )
+                btn_excel.click_input()
+            except Exception as e:
+                self.log(f"❌ Erro ao clicar no ícone de exportar Excel: {str(e)}")
+                return False
+
+            self.log("📊 Aguardando janela de salvamento...")
+            timeout_total = 180
+            inicio = time.time()
+            janela_encontrada = False
+
+            while time.time() - inicio < timeout_total:
+                if self.should_stop():
+                    return False
+
+                if self._any_error_dialog_visible():
+                    deve_continuar = self.handle_error_dialogs()
+                    if deve_continuar:
+                        time.sleep(0.5)
+                        continue
+                    else:
+                        self.log("⚠️ Diálogo de erro detectado ao gerar relatório de Empregados")
+                        self.cleanup_windows()
+                        return False
+
+                if self._window_exists("Selecione o arquivo", "#32770") or self._save_excel_dialog_exists():
+                    janela_encontrada = True
+                    break
+
+                time.sleep(0.25)
+
+            if not janela_encontrada:
+                self.log("❌ Timeout aguardando janela de salvamento do Excel")
+                return False
+
+            if not self.handle_error_dialogs():
+                self.cleanup_windows()
+                return False
+
+            return self.salvar_excel_empregados()
+
+        except Exception as e:
+            self.log(f"❌ Erro ao gerar relatório de Empregados: {str(e)}")
+            self.log(f"Traceback: {traceback.format_exc()}")
+            return False
+
+    def processar_contrato_prazo_determinado(self) -> bool:
+        """Gera o relatório de Contrato por Prazo Determinado (filtro do mês de
+        referência, contrato de experiência) em Excel. Roda uma única vez, logo
+        após processar_relatorio_empregados e antes do loop de emissão de contratos."""
+        try:
+            if self.should_stop():
+                return False
+            self.check_pause()
+
+            # Fecha qualquer janela "Contrato por Prazo Determinado" residual
+            # (ex: de uma tentativa anterior) para evitar ambiguidade ao localizar.
+            for _ in range(5):
+                try:
+                    residual = self.main_window.child_window(
+                        title="Contrato por Prazo Determinado", class_name="FNWND3190", found_index=0
+                    )
+                    if not residual.exists():
+                        break
+                    residual.close()
+                    time.sleep(0.5)
+                except Exception:
+                    break
+
+            # --- 1) Abrir janela "Contrato por Prazo Determinado" via menu ---
+            # Navegação confirmada pelo usuário: Alt+R (Relatórios) -> 'o' (Outros)
+            # -> 'c' (Contrato) -> 'c' (Contrato de Prazo Determinado) -> Enter.
+            self.log("📃 Acessando menu Relatórios > Outros > Contrato > Contrato de Prazo Determinado")
+            self.main_window.set_focus()
+            send_keys('%r')  # Alt+R
+            if not self.smart_sleep(0.5):
+                return False
+            send_keys('o')  # Outros
+            if not self.smart_sleep(0.5):
+                return False
+            send_keys('c')  # Contrato
+            if not self.smart_sleep(0.5):
+                return False
+            send_keys('c')  # Contrato de Prazo Determinado
+            if not self.smart_sleep(0.5):
+                return False
+            send_keys('{ENTER}')
+            if not self.smart_sleep(1):
+                return False
+
+            max_attempts = 10
+            contrato_window = None
+            for attempt in range(max_attempts):
+                if self.should_stop():
+                    return False
+                self.check_pause()
+                try:
+                    candidata = self.main_window.child_window(
+                        title="Contrato por Prazo Determinado", class_name="FNWND3190", found_index=0
+                    )
+                    if candidata.exists():
+                        contrato_window = candidata
+                        break
+                    if not self.handle_error_dialogs():
+                        self.cleanup_windows()
+                        return False
+                    if not self.smart_sleep(1):
+                        return False
+                except Exception:
+                    if attempt == max_attempts - 1:
+                        self.log("❌ Janela Contrato por Prazo Determinado não encontrada (timeout)")
+                        return False
+
+            if not contrato_window:
+                self.log("❌ Janela Contrato por Prazo Determinado não encontrada")
+                return False
+            self.log("📃 Janela Contrato por Prazo Determinado localizada")
+
+            if self.should_stop():
+                return False
+            self.check_pause()
+
+            # --- 2/3) Datas Início/Fim — campo Início já vem focado ao abrir a
+            # janela, então digita direto e usa Tab para ir ao campo Fim
+            # (AutomationId 1007), em vez de localizar por child_window. ---
+            data_inicio, data_fim = self.calcular_periodo_mes_referencia()
+            try:
+                send_keys('^a')
+                send_keys(data_inicio)
+                if not self.smart_sleep(0.3):
+                    return False
+                send_keys('{TAB}')
+                if not self.smart_sleep(0.3):
+                    return False
+                send_keys('^a')
+                send_keys(data_fim)
+                if not self.smart_sleep(0.3):
+                    return False
+            except Exception as e:
+                self.log(f"❌ Erro ao preencher datas do contrato: {str(e)}")
+                return False
+
+            # --- 4) Radio "Contrato de experiência" (auto_id 6) ---
+            # RadioButton usa SelectionItemPattern (is_selected), não TogglePattern
+            # (get_toggle_state é de checkbox e falha aqui).
+            try:
+                radio_experiencia = contrato_window.child_window(auto_id="6", class_name="Button")
+                if not radio_experiencia.is_selected():
+                    radio_experiencia.click_input()
+                    if not self.smart_sleep(0.3):
+                        return False
+                self.log("✅ Contrato de experiência selecionado")
+            except Exception as e:
+                self.log(f"❌ Erro ao selecionar Contrato de experiência: {str(e)}")
+                return False
+
+            if self.should_stop():
+                return False
+            self.check_pause()
+
+            # --- 5) OK ---
+            send_keys('%o')  # Alt+O
+            if not self.smart_sleep(1):
+                return False
+            if not self.handle_error_dialogs():
+                self.cleanup_windows()
+                return False
+
+            # --- 6) Clicar no ícone de exportar Excel (painel FNUDO3190, auto_id
+            # 1020, mesma posição confirmada na janela Empregados) e aguardar o
+            # diálogo "Selecione o arquivo" ---
+            if not self.smart_sleep(2):
+                return False
+            self.log("📊 Clicando no ícone de exportar Excel")
+            try:
+                btn_excel = contrato_window.child_window(
+                    auto_id="1020", class_name="FNUDO3190", found_index=0
+                )
+                btn_excel.click_input()
+            except Exception as e:
+                self.log(f"❌ Erro ao clicar no ícone de exportar Excel: {str(e)}")
+                return False
+
+            self.log("📊 Aguardando janela de salvamento...")
+            timeout_total = 180
+            inicio = time.time()
+            janela_encontrada = False
+
+            while time.time() - inicio < timeout_total:
+                if self.should_stop():
+                    return False
+
+                if self._any_error_dialog_visible():
+                    deve_continuar = self.handle_error_dialogs()
+                    if deve_continuar:
+                        time.sleep(0.5)
+                        continue
+                    else:
+                        self.log("⚠️ Diálogo de erro detectado ao gerar relatório de Contrato por Prazo Determinado")
+                        self.cleanup_windows()
+                        return False
+
+                if self._window_exists("Selecione o arquivo", "#32770") or self._save_excel_dialog_exists():
+                    janela_encontrada = True
+                    break
+
+                time.sleep(0.25)
+
+            if not janela_encontrada:
+                self.log("❌ Timeout aguardando janela de salvamento do Excel")
+                return False
+
+            if not self.handle_error_dialogs():
+                self.cleanup_windows()
+                return False
+
+            return self.salvar_excel_contrato_prazo_determinado()
+
+        except Exception as e:
+            self.log(f"❌ Erro ao gerar relatório de Contrato por Prazo Determinado: {str(e)}")
+            self.log(f"Traceback: {traceback.format_exc()}")
+            return False
 
 def main():
     """Função principal"""
