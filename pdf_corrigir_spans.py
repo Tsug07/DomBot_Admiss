@@ -12,6 +12,7 @@ Uso:
 """
 from __future__ import annotations
 
+import os
 import sys
 import re
 from pathlib import Path
@@ -402,8 +403,18 @@ def corrigir_pdf(input_path: Path, output_path: Path | None = None,
                 avisos.append(aviso)
             corrigidas += 1
 
-    doc.save(str(output_path), garbage=4, deflate=True, clean=True)
-    doc.close()
+    # PyMuPDF nao permite doc.save() de volta no mesmo caminho ja aberto
+    # com garbage/clean/deflate (exige incremental=True nesse caso). Para
+    # poder sobrescrever o original com a otimizacao completa, salva-se
+    # num arquivo temporario na mesma pasta e substitui atomicamente.
+    if output_path.resolve() == input_path.resolve():
+        tmp_path = output_path.with_name(output_path.stem + ".tmp_corrigido" + output_path.suffix)
+        doc.save(str(tmp_path), garbage=4, deflate=True, clean=True)
+        doc.close()
+        os.replace(tmp_path, output_path)
+    else:
+        doc.save(str(output_path), garbage=4, deflate=True, clean=True)
+        doc.close()
 
     return {
         "fragmentadas": len(linhas),
