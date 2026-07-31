@@ -18,6 +18,7 @@ import ctypes
 import time
 import logging
 import json
+import unicodedata
 from datetime import datetime, timedelta
 import os
 import requests
@@ -92,6 +93,11 @@ class AutomacaoGUI:
         self.caminho_excel_revisado = None
         self.usar_relatorios_existentes = ctk.BooleanVar(value=False)
 
+        # Modo manual: emite contratos a partir de uma planilha própria, pulando
+        # toda a geração automática (Empregados/Contrato -> Meg_One -> revisão).
+        # Usado para contratos específicos que fogem do padrão automático.
+        self.modo_manual = False
+
         # Estatísticas
         self.stats = {
             'processados': 0,
@@ -120,6 +126,11 @@ class AutomacaoGUI:
         self.periodo_referencia = ctk.StringVar(value=(datetime.now() + timedelta(days=1)).strftime("%d/%m/%Y"))
         self.diretorio_salvamento = ctk.StringVar()
         self.status_var = ctk.StringVar(value="Aguardando início...")
+
+        # Variáveis exclusivas do modo manual
+        self.arquivo_excel_manual = ctk.StringVar()
+        self.diretorio_manual = ctk.StringVar()
+        self.linha_inicial_manual = ctk.StringVar(value="2")
 
         # Variáveis de controle
         self.total_linhas = 0
@@ -403,10 +414,12 @@ class AutomacaoGUI:
 
         tab_logs = self.tabview.add("📋 Logs")
         tab_preview = self.tabview.add("📊 Preview")
+        tab_manual = self.tabview.add("✍ Manual")
         tab_nao_emitir = self.tabview.add("🚫 Não Emitir")
 
         self.criar_aba_logs(tab_logs)
         self.criar_aba_preview(tab_preview)
+        self.criar_aba_manual(tab_manual)
         self.criar_aba_nao_emitir(tab_nao_emitir)
 
     def criar_aba_logs(self, parent):
@@ -479,6 +492,158 @@ class AutomacaoGUI:
             fg_color=self.CORES['fundo_escuro'], corner_radius=6
         )
         self.preview_text.grid(row=1, column=0, sticky="nsew", padx=3, pady=(0, 3))
+
+    def criar_aba_manual(self, parent):
+        """Cria a aba de emissão manual — emite contratos a partir de uma planilha
+        própria, sem gerar os relatórios de Empregados/Contrato nem passar pelo
+        Meg_One. Usada para contratos específicos que fogem do padrão automático."""
+        parent.grid_columnconfigure(0, weight=1)
+        parent.grid_rowconfigure(3, weight=1)
+
+        ctk.CTkLabel(
+            parent,
+            text="Emite direto da sua planilha, pulando a geração automática dos relatórios "
+                 "e o filtro de 'Não Emitir'.",
+            font=ctk.CTkFont(size=10), text_color="#95A5A6",
+            wraplength=700, justify="left"
+        ).grid(row=0, column=0, sticky="w", padx=3, pady=(3, 6))
+
+        # Planilha manual
+        arq_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        arq_frame.grid(row=1, column=0, sticky="ew", padx=3)
+        arq_frame.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(
+            arq_frame, text="📁", font=ctk.CTkFont(size=14)
+        ).grid(row=0, column=0, padx=(0, 5))
+
+        ctk.CTkEntry(
+            arq_frame, textvariable=self.arquivo_excel_manual,
+            placeholder_text="Planilha com os contratos a emitir (Nº, Cod.Funcionário, Tipo de Contrato, Documento)...",
+            height=30, font=ctk.CTkFont(size=11)
+        ).grid(row=0, column=1, sticky="ew", padx=(0, 8))
+
+        ctk.CTkButton(
+            arq_frame, text="Procurar", command=self.selecionar_arquivo_manual,
+            width=80, height=30, font=ctk.CTkFont(size=11),
+            fg_color=self.CORES['info'], hover_color="#2980B9"
+        ).grid(row=0, column=2, padx=(0, 12))
+
+        ctk.CTkLabel(
+            arq_frame, text="Linha:", font=ctk.CTkFont(size=11), text_color="#BDC3C7"
+        ).grid(row=0, column=3, padx=(0, 3))
+
+        ctk.CTkEntry(
+            arq_frame, textvariable=self.linha_inicial_manual,
+            width=50, height=30, font=ctk.CTkFont(size=11), justify="center"
+        ).grid(row=0, column=4)
+
+        # Diretório de salvamento próprio do modo manual
+        dir_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        dir_frame.grid(row=2, column=0, sticky="ew", padx=3, pady=(8, 6))
+        dir_frame.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(
+            dir_frame, text="📂", font=ctk.CTkFont(size=14)
+        ).grid(row=0, column=0, padx=(0, 5))
+
+        ctk.CTkEntry(
+            dir_frame, textvariable=self.diretorio_manual,
+            placeholder_text="Diretório onde os PDFs manuais serão salvos...",
+            height=30, font=ctk.CTkFont(size=11)
+        ).grid(row=0, column=1, sticky="ew", padx=(0, 8))
+
+        ctk.CTkButton(
+            dir_frame, text="Selecionar", command=self.selecionar_diretorio_manual,
+            width=90, height=30, font=ctk.CTkFont(size=11),
+            fg_color=self.CORES['info'], hover_color="#2980B9"
+        ).grid(row=0, column=2, padx=(0, 12))
+
+        self.btn_emitir_manual = ctk.CTkButton(
+            dir_frame, text="▶ Emitir manual", command=self.iniciar_manual_thread,
+            width=130, height=30, font=ctk.CTkFont(size=11, weight="bold"),
+            fg_color=self.CORES['sucesso'], hover_color="#27AE60"
+        )
+        self.btn_emitir_manual.grid(row=0, column=3)
+
+        # Preview da planilha manual
+        self.preview_manual_text = ctk.CTkTextbox(
+            parent, font=ctk.CTkFont(family="Consolas", size=10),
+            fg_color=self.CORES['fundo_escuro'], corner_radius=6
+        )
+        self.preview_manual_text.grid(row=3, column=0, sticky="nsew", padx=3, pady=(0, 3))
+
+    def selecionar_arquivo_manual(self):
+        """Seleciona a planilha do modo manual e carrega seu preview."""
+        filename = ctk.filedialog.askopenfilename(
+            filetypes=[("Excel files", "*.xlsx *.xls")],
+            title="Selecione a planilha dos contratos manuais"
+        )
+        if filename:
+            self.arquivo_excel_manual.set(filename)
+            self.adicionar_log(f"[Manual] Planilha selecionada: {os.path.basename(filename)}", logging.INFO, "info")
+            self.carregar_preview_manual()
+
+    def selecionar_diretorio_manual(self):
+        """Seleciona o diretório de salvamento dos PDFs manuais."""
+        import subprocess
+        try:
+            script = (
+                "Add-Type -AssemblyName System.Windows.Forms; "
+                "$f = New-Object System.Windows.Forms.FolderBrowserDialog; "
+                "$f.Description = 'Selecione o diretório para salvar os PDFs manuais'; "
+                "$f.ShowNewFolderButton = $true; "
+                "if ($f.ShowDialog() -eq 'OK') { $f.SelectedPath } else { '' }"
+            )
+            result = subprocess.run(
+                ["powershell", "-Command", script],
+                capture_output=True, text=True, timeout=120
+            )
+            diretorio = result.stdout.strip()
+            if diretorio:
+                self.diretorio_manual.set(diretorio)
+                self.adicionar_log(f"[Manual] Diretório de salvamento: {diretorio}", logging.INFO, "info")
+        except Exception as e:
+            self.adicionar_log(f"[Manual] Erro ao selecionar diretório: {e}", logging.ERROR, "erro")
+
+    def carregar_preview_manual(self):
+        """Carrega o preview da planilha manual e valida as colunas obrigatórias."""
+        caminho = self.arquivo_excel_manual.get()
+        if not caminho:
+            return
+
+        try:
+            df = pd.read_excel(caminho)
+            self.preview_manual_text.delete("1.0", "end")
+
+            header = " | ".join([f"{col:^15}" for col in df.columns[:6]])
+            self.preview_manual_text.insert("end", f"{'─' * len(header)}\n")
+            self.preview_manual_text.insert("end", f"{header}\n")
+            self.preview_manual_text.insert("end", f"{'─' * len(header)}\n")
+
+            for _, row in df.head(50).iterrows():
+                row_text = " | ".join([f"{str(val)[:15]:^15}" for val in row.values[:6]])
+                self.preview_manual_text.insert("end", f"{row_text}\n")
+
+            if len(df) > 50:
+                self.preview_manual_text.insert("end", f"\n... e mais {len(df) - 50} linhas\n")
+
+            colunas_faltando = [
+                col for col in ['Nº', 'Cod.Funcionário', 'Tipo de Contrato', 'Documento']
+                if col not in df.columns
+            ]
+            if colunas_faltando:
+                self.adicionar_log(
+                    f"[Manual] Colunas obrigatórias não encontradas: {', '.join(colunas_faltando)}",
+                    logging.WARNING, "aviso"
+                )
+            else:
+                self.adicionar_log(
+                    f"[Manual] Preview carregado: {len(df)} linhas. Todas as colunas obrigatórias encontradas",
+                    logging.INFO, "sucesso"
+                )
+        except Exception as e:
+            self.adicionar_log(f"[Manual] Erro ao carregar preview: {str(e)}", logging.ERROR, "erro")
 
     def criar_aba_nao_emitir(self, parent):
         """Cria a aba de gerenciamento da lista de empresas que nunca devem
@@ -776,11 +941,82 @@ class AutomacaoGUI:
 
         # Atualizar interface
         self.btn_iniciar.configure(state="disabled")
+        self.btn_emitir_manual.configure(state="disabled")
         self.btn_pausar.configure(state="normal")
         self.btn_parar.configure(state="normal")
         self.atualizar_status_indicator('executando')
 
         # Iniciar timer
+        self.atualizar_tempo()
+
+    def validar_entrada_manual(self) -> Tuple[bool, str]:
+        """Valida os campos do modo manual. Diferente do automático, aqui a
+        planilha é fornecida pelo usuário, então ela é validada de fato."""
+        caminho = self.arquivo_excel_manual.get().strip()
+        if not caminho:
+            return False, "Selecione a planilha dos contratos manuais"
+
+        if not os.path.exists(caminho):
+            return False, f"Planilha não encontrada: {caminho}"
+
+        if not self.diretorio_manual.get().strip():
+            return False, "Selecione o diretório de salvamento dos PDFs manuais"
+
+        try:
+            linha = int(self.linha_inicial_manual.get())
+        except ValueError:
+            return False, "Linha inicial deve ser um número inteiro"
+        if linha < 2:
+            return False, "Linha inicial deve ser 2 ou maior (linha 1 é o cabeçalho)"
+
+        try:
+            df = pd.read_excel(caminho)
+        except Exception as e:
+            return False, f"Erro ao ler a planilha: {e}"
+
+        colunas_faltando = [
+            col for col in ['Nº', 'Cod.Funcionário', 'Tipo de Contrato', 'Documento']
+            if col not in df.columns
+        ]
+        if colunas_faltando:
+            return False, f"Colunas obrigatórias não encontradas: {', '.join(colunas_faltando)}"
+
+        if linha - 2 >= len(df):
+            return False, f"Linha inicial {linha} está além do fim da planilha ({len(df)} linhas de dados)"
+
+        return True, "Validação OK"
+
+    def iniciar_manual_thread(self):
+        """Inicia a emissão manual em uma thread separada."""
+        if self.executando:
+            self.adicionar_log("Automação já em execução", logging.WARNING, "aviso")
+            return
+
+        valido, mensagem = self.validar_entrada_manual()
+        if not valido:
+            self.adicionar_log(f"[Manual] Erro de validação: {mensagem}", logging.ERROR, "erro")
+            messagebox.showerror("Erro de Validação — Modo Manual", mensagem)
+            return
+
+        self.modo_manual = True
+
+        # Resetar estatísticas
+        self.linhas_processadas = 0
+        self.linhas_com_erro = 0
+        self.linhas_puladas = 0
+        self.stats = {'processados': 0, 'sucesso': 0, 'erros': 0, 'puladas': 0, 'tempo_inicio': datetime.now()}
+        self.sucesso_label.configure(text="0")
+        self.erros_label.configure(text="0")
+
+        self.thread_automacao = threading.Thread(target=self.iniciar_automacao_manual)
+        self.thread_automacao.daemon = True
+        self.thread_automacao.start()
+
+        self.btn_iniciar.configure(state="disabled")
+        self.btn_emitir_manual.configure(state="disabled")
+        self.btn_pausar.configure(state="normal")
+        self.btn_parar.configure(state="normal")
+        self.atualizar_status_indicator('executando')
         self.atualizar_tempo()
 
     def pausar_automacao(self):
@@ -1289,6 +1525,168 @@ class AutomacaoGUI:
             self.pausa_solicitada = False
             self.atualizar_tempo()  # Atualização final do timer
             self.btn_iniciar.configure(state="normal")
+            self.btn_emitir_manual.configure(state="normal")
+            self.btn_pausar.configure(state="disabled", text="⏸ Pausar")
+            self.btn_parar.configure(state="disabled")
+
+    def iniciar_automacao_manual(self):
+        """Emissão manual: lê a planilha fornecida pelo usuário e emite os
+        contratos direto, sem gerar os relatórios de Empregados/Contrato, sem
+        Meg_One, sem dashboard de revisão e sem o filtro de 'Não Emitir' — o
+        modo manual é justamente a exceção a essas regras."""
+        try:
+            self.adicionar_log("Iniciando emissão MANUAL...", logging.INFO, "processando")
+            self.status_var.set("Em execução (manual)...")
+            self.executando = True
+            self.progress_bar.set(0)
+
+            linha_inicial = int(self.linha_inicial_manual.get())
+
+            automacao = DominioAutomation(self.logger, self)
+
+            if not automacao.connect_to_dominio():
+                self.adicionar_log("Não foi possível conectar ao Domínio", logging.ERROR, "erro")
+                return
+
+            # Carregar planilha manual, aplicando a linha inicial (linha 2 = índice 0)
+            df = pd.read_excel(self.arquivo_excel_manual.get())
+            df_processar = df.iloc[linha_inicial - 2:]
+
+            self.total_linhas = len(df_processar)
+            self.adicionar_log(
+                f"[Manual] Planilha carregada: {self.total_linhas} linhas para processar "
+                f"(a partir da linha {linha_inicial})",
+                logging.INFO, "info"
+            )
+            self.total_label.configure(text=str(self.total_linhas))
+
+            for idx, (original_index, row) in enumerate(df_processar.iterrows()):
+                if not self.executando:
+                    self.adicionar_log("Emissão manual interrompida pelo usuário", logging.INFO, "aviso")
+                    break
+
+                while self.pausa_solicitada and self.executando:
+                    time.sleep(0.5)
+
+                if not self.executando:
+                    break
+
+                self.atualizar_progresso(idx + 1, self.total_linhas)
+
+                linha_excel = original_index + 2
+
+                if pd.isna(row['Nº']) or str(row['Nº']).strip() == '':
+                    self.linhas_puladas += 1
+                    self.adicionar_log(
+                        f"[Manual] Linha {linha_excel} pulada: sem código de empresa (Nº vazio)",
+                        logging.WARNING, "aviso"
+                    )
+                    self.atualizar_estatisticas()
+                    continue
+
+                empresa_num = str(int(row['Nº']))
+                self.empresa_label.configure(text=empresa_num[:20])
+
+                try:
+                    func_nome = row.get('Funcionário', 'N/A')
+                    self.adicionar_log(
+                        f"[Manual] Processando linha {linha_excel} - Empresa {row['Nº']} - {func_nome}",
+                        logging.INFO, "processando"
+                    )
+
+                    success = automacao.processar_linha(row, original_index, linha_excel)
+
+                    if success:
+                        self.linhas_processadas += 1
+                        self.success_logger.info(
+                            f"[MANUAL] Linha {linha_excel} - Empresa {row['Nº']} - {func_nome} - processada com sucesso"
+                        )
+                        self.adicionar_log(f"[Manual] Linha {linha_excel} processada com sucesso", logging.INFO, "sucesso")
+                    else:
+                        self.linhas_com_erro += 1
+                        self.error_logger.error(
+                            f"[MANUAL] Linha {linha_excel} - Empresa {row['Nº']} - {func_nome} - erro no processamento"
+                        )
+                        self.adicionar_log(f"[Manual] Erro na linha {linha_excel}", logging.ERROR, "erro")
+                        time.sleep(2)  # aguarda sistema estabilizar antes da próxima linha
+
+                    self.atualizar_estatisticas()
+
+                except Exception as e:
+                    self.linhas_com_erro += 1
+                    erro_msg = f"[MANUAL] Linha {linha_excel} - Erro: {str(e)}"
+                    self.error_logger.error(erro_msg)
+                    self.adicionar_log(erro_msg, logging.ERROR, "erro")
+                    self.atualizar_estatisticas()
+
+            if self.executando:
+                self.status_var.set("Emissão manual concluída")
+                self.progress_bar.set(1.0)
+                self.progress_label.configure(text="100%")
+                self.atualizar_status_indicator('concluido')
+                self.adicionar_log("Emissão manual concluída!", logging.INFO, "sucesso")
+                self.adicionar_log(
+                    f"Resumo: {self.linhas_processadas} processadas, "
+                    f"{self.linhas_com_erro} com erro, {self.linhas_puladas} puladas",
+                    logging.INFO, "info"
+                )
+
+                # Corrige spans fragmentados nos PDFs da pasta manual
+                try:
+                    pasta_pdfs = self.diretorio_manual.get()
+                    if pasta_pdfs and os.path.isdir(pasta_pdfs):
+                        pdfs = list(Path(pasta_pdfs).glob("*.pdf"))
+                        self.adicionar_log(f"[Manual] Corrigindo spans em {len(pdfs)} PDF(s)...", logging.INFO, "info")
+                        total_corrigidas = 0
+                        total_com_fragmentacao = 0
+                        falhas = 0
+                        for pdf_path in pdfs:
+                            try:
+                                stats = corrigir_pdf(pdf_path, output_path=pdf_path)
+                                if stats["fragmentadas"] > 0:
+                                    total_com_fragmentacao += 1
+                                    total_corrigidas += stats["corrigidas"]
+                            except Exception as e_corr:
+                                falhas += 1
+                                self.error_logger.error(f"[MANUAL] Correção de spans falhou em {pdf_path.name}: {e_corr}")
+                        self.adicionar_log(
+                            f"[Manual] Correção de spans concluída: {total_com_fragmentacao} arquivo(s) corrigido(s) "
+                            f"({total_corrigidas} linha(s)), {falhas} falha(s)",
+                            logging.INFO, "sucesso" if falhas == 0 else "aviso"
+                        )
+                except Exception as e:
+                    self.adicionar_log(f"[Manual] Erro ao corrigir spans: {str(e)}", logging.WARNING, "aviso")
+
+                # Notificação ao Discord
+                try:
+                    data_referencia = self.periodo_referencia.get() or (datetime.now() + timedelta(days=1)).strftime("%d/%m/%Y")
+                    mensagem = (
+                        f"📋 **Contratos Admissionais Emitidos (MANUAL)**\n\n"
+                        f"📅 **Período de referência:** {data_referencia}\n"
+                        f"📊 **Quantidade emitida:** {self.linhas_processadas}\n"
+                        f"📂 **Diretório dos PDFs:** `{self.diretorio_manual.get()}`\n\n"
+                        f"✅ Emissão manual finalizada com sucesso!\n\n"
+                        f"<@&1299044385899548752>"
+                    )
+                    webhook_url = os.getenv("DISCORD_WEBHOOK_URL")
+                    requests.post(webhook_url, json={"content": mensagem}, timeout=10)
+                    self.adicionar_log("Notificação enviada ao Discord", logging.INFO, "sucesso")
+                except Exception as e:
+                    self.adicionar_log(f"Erro ao enviar notificação ao Discord: {str(e)}", logging.WARNING, "aviso")
+
+        except Exception as e:
+            erro_msg = f"Erro crítico na emissão manual: {str(e)}"
+            self.error_logger.error(erro_msg)
+            self.adicionar_log(erro_msg, logging.ERROR, "erro")
+            self.status_var.set("Erro no processamento")
+            self.atualizar_status_indicator('erro')
+        finally:
+            self.executando = False
+            self.pausa_solicitada = False
+            self.modo_manual = False
+            self.atualizar_tempo()
+            self.btn_iniciar.configure(state="normal")
+            self.btn_emitir_manual.configure(state="normal")
             self.btn_pausar.configure(state="disabled", text="⏸ Pausar")
             self.btn_parar.configure(state="disabled")
 
@@ -1870,6 +2268,9 @@ class DominioAutomation:
                 if self.should_stop():
                     return False
 
+                # Diálogo de "já existe / substituir" não é erro — confirma e segue
+                self.handle_sobrescrever_dialog()
+
                 # Verificar diálogos de erro/aviso
                 if self._any_error_dialog_visible():
                     deve_continuar = self.handle_error_dialogs()
@@ -2013,8 +2414,12 @@ class DominioAutomation:
             for ch in r'*?"<>|':
                 nome_pdf = nome_pdf.replace(ch, '-')
 
-            # Se o usuário selecionou um diretório, montar caminho absoluto separando diretório do nome
-            diretorio = self.gui.diretorio_salvamento.get()
+            # Se o usuário selecionou um diretório, montar caminho absoluto separando diretório do nome.
+            # No modo manual o destino é o diretório próprio da aba Manual.
+            if getattr(self.gui, 'modo_manual', False):
+                diretorio = self.gui.diretorio_manual.get()
+            else:
+                diretorio = self.gui.diretorio_salvamento.get()
             if diretorio:
                 caminho_completo = os.path.join(diretorio, nome_pdf)
                 self.log(f"📝 Salvando em: {caminho_completo}")
@@ -2045,9 +2450,10 @@ class DominioAutomation:
             self.log("💾 Salvando PDF")
             send_keys('{ENTER}')
 
-            # Esperar janela de salvamento fechar (verifica via hwnd)
+            # Esperar o salvamento concluir, confirmando a substituição se o PDF
+            # já existir (reemissão para a mesma data) — ver _criar_checador_salvamento.
             if not self.wait_for_condition(
-                lambda: not win32gui.IsWindow(save_hwnd) or not win32gui.IsWindowVisible(save_hwnd),
+                self._criar_checador_salvamento(save_hwnd),
                 timeout=30,
                 poll_interval=0.3,
                 description="Aguardando salvamento do PDF"
@@ -2121,8 +2527,10 @@ class DominioAutomation:
             self.log("💾 Salvando Excel de Empregados")
             send_keys('{ENTER}')
 
+            # O diálogo "já existe / substituir" é uma janela SEPARADA que só
+            # aparece depois que 'Selecione o arquivo' fecha — ver _criar_checador_salvamento.
             if not self.wait_for_condition(
-                lambda: not win32gui.IsWindow(save_hwnd) or not win32gui.IsWindowVisible(save_hwnd),
+                self._criar_checador_salvamento(save_hwnd),
                 timeout=60,
                 poll_interval=0.3,
                 description="Aguardando salvamento do Excel de Empregados"
@@ -2186,8 +2594,11 @@ class DominioAutomation:
             self.log("💾 Salvando Excel de Contrato por Prazo Determinado")
             send_keys('{ENTER}')
 
+            # O diálogo "já existe / substituir" é uma janela SEPARADA que só
+            # aparece depois que 'Selecione o arquivo' fecha — por isso não basta
+            # checar save_hwnd, senão a espera termina em 0s com o diálogo aberto.
             if not self.wait_for_condition(
-                lambda: not win32gui.IsWindow(save_hwnd) or not win32gui.IsWindowVisible(save_hwnd),
+                self._criar_checador_salvamento(save_hwnd),
                 timeout=60,
                 poll_interval=0.3,
                 description="Aguardando salvamento do Excel de Contrato por Prazo Determinado"
@@ -2204,10 +2615,139 @@ class DominioAutomation:
             self.log(f"❌ Erro ao salvar Excel de Contrato por Prazo Determinado: {str(e)}")
             return False
 
+    def _criar_checador_salvamento(self, save_hwnd: int, estabilidade: float = 4.0):
+        """Cria a condição de fim de salvamento usada pelas esperas de PDF e Excel.
+
+        O diálogo de 'já existe / substituir' é uma janela SEPARADA que só surge
+        DEPOIS que a janela de salvamento fecha. Checar apenas save_hwnd faz a
+        espera terminar instantaneamente ("concluído em 0.0s") com o diálogo
+        ainda aberto na tela e o bot declarando sucesso indevidamente.
+
+        Por isso, além de tratar o diálogo, exige que a tela fique limpa por
+        `estabilidade` segundos antes de dar o salvamento por concluído — tempo
+        para o diálogo atrasado aparecer e ser confirmado."""
+        estado = {"limpo_desde": None}
+
+        def checar() -> bool:
+            # Confirma a substituição, se houver diálogo aguardando
+            if self.handle_sobrescrever_dialog():
+                estado["limpo_desde"] = None  # reinicia a contagem de estabilidade
+                return False
+
+            if win32gui.IsWindow(save_hwnd) and win32gui.IsWindowVisible(save_hwnd):
+                estado["limpo_desde"] = None
+                return False
+
+            # Janela fechada e nenhum diálogo: aguarda o período de estabilidade
+            agora = time.time()
+            if estado["limpo_desde"] is None:
+                estado["limpo_desde"] = agora
+                return False
+
+            return (agora - estado["limpo_desde"]) >= estabilidade
+
+        return checar
+
+    def handle_sobrescrever_dialog(self) -> bool:
+        """Confirma o diálogo de 'arquivo já existe — deseja substituí-lo?' com Sim.
+
+        Aparece sempre que uma emissão é reprocessada para a mesma data de
+        referência (ex: rodou sábado, entraram novos funcionários e roda de novo
+        para o mesmo sábado). Substituir é sempre o comportamento desejado, pois
+        o relatório novo é o mais completo.
+
+        Retorna True se tratou algum diálogo, False se não havia nenhum."""
+        tratou = False
+        try:
+            # Pode haver mais de um em sequência (Excel + PDF), então repete
+            # até não sobrar nenhum.
+            for _ in range(5):
+                found_hwnd = None
+                found_text = ""
+
+                def enum_callback(hwnd, _ctx):
+                    nonlocal found_hwnd, found_text
+                    if not win32gui.IsWindowVisible(hwnd):
+                        return True
+                    try:
+                        if win32gui.GetClassName(hwnd) != "#32770":
+                            return True
+                        # Junta o texto de todos os Static filhos para achar a mensagem
+                        textos = []
+
+                        def child_cb(child_hwnd, _c):
+                            try:
+                                if win32gui.GetClassName(child_hwnd) == "Static":
+                                    textos.append(win32gui.GetWindowText(child_hwnd))
+                            except Exception:
+                                pass
+                            return True
+
+                        win32gui.EnumChildWindows(hwnd, child_cb, None)
+                        conteudo = " ".join(textos)
+                        # Normaliza acentos: o texto pode vir com acentuação
+                        # diferente conforme a codepage do sistema.
+                        conteudo = unicodedata.normalize("NFKD", conteudo)
+                        conteudo = "".join(c for c in conteudo if not unicodedata.combining(c)).lower()
+                        if "ja existe" in conteudo and "substitu" in conteudo:
+                            found_hwnd = hwnd
+                            found_text = " ".join(textos)
+                            return False
+                    except Exception:
+                        pass
+                    return True
+
+                win32gui.EnumWindows(enum_callback, None)
+
+                if not found_hwnd:
+                    break
+
+                self.log(f"♻️ Arquivo já existe — substituindo: {found_text[:120]}")
+                self._force_focus(found_hwnd)
+                time.sleep(0.2)
+
+                # Clica no botão "Sim" explicitamente (o diálogo tem Sim/Não,
+                # não OK — depender do default do ENTER seria frágil).
+                clicou = False
+                try:
+                    dlg_app = Application(backend="uia").connect(handle=found_hwnd)
+                    dlg = dlg_app.window(handle=found_hwnd)
+                    for titulo in ("&Sim", "Sim", "&Yes", "Yes"):
+                        try:
+                            btn = dlg.child_window(title=titulo, class_name="Button")
+                            if btn.exists():
+                                btn.click_input()
+                                clicou = True
+                                break
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
+
+                if not clicou:
+                    # Fallback: 'S' é o acelerador de "Sim"; ENTER confirma o default
+                    send_keys('%s')
+                    time.sleep(0.2)
+                    if win32gui.IsWindow(found_hwnd) and win32gui.IsWindowVisible(found_hwnd):
+                        send_keys('{ENTER}')
+
+                tratou = True
+                time.sleep(0.6)
+
+            return tratou
+
+        except Exception as e:
+            self.log(f"⚠️ Exceção ao tratar diálogo de substituição: {str(e)}")
+            return tratou
+
     def handle_error_dialogs(self) -> bool:
         """Trata diálogos de erro que podem aparecer.
         Retorna True se deve continuar, False se deve abortar."""
         try:
+            # O diálogo de "já existe / substituir" não é erro — trata e segue.
+            if self.handle_sobrescrever_dialog():
+                return True
+
             error_titles_lower = {"erro", "erro léxico", "aviso", "atenção",
                                   "informação", "alerta", "warning", "error"}
 
@@ -2572,6 +3112,9 @@ class DominioAutomation:
                 if self.should_stop():
                     return False
 
+                # Diálogo de "já existe / substituir" não é erro — confirma e segue
+                self.handle_sobrescrever_dialog()
+
                 if self._any_error_dialog_visible():
                     deve_continuar = self.handle_error_dialogs()
                     if deve_continuar:
@@ -2748,6 +3291,9 @@ class DominioAutomation:
             while time.time() - inicio < timeout_total:
                 if self.should_stop():
                     return False
+
+                # Diálogo de "já existe / substituir" não é erro — confirma e segue
+                self.handle_sobrescrever_dialog()
 
                 if self._any_error_dialog_visible():
                     deve_continuar = self.handle_error_dialogs()
