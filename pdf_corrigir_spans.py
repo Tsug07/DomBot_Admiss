@@ -298,6 +298,56 @@ def detectar_nomes_filhos(doc: fitz.Document) -> list[FragmentedLine]:
 
 
 # ---------------------------------------------------------------------------
+# Paginas em branco
+# ---------------------------------------------------------------------------
+
+def pagina_esta_em_branco(page: fitz.Page) -> bool:
+    """
+    Retorna True se a pagina nao tem nenhum conteudo visivel.
+
+    O Dominio as vezes emite uma ultima folha totalmente vazia, o que faz o
+    cliente achar que falta algo no contrato. A checagem e conservadora: alem
+    de texto, verifica imagens, vetores e anotacoes, e so entao confirma
+    renderizando a pagina e olhando os pixels — assim uma pagina com carimbo,
+    logo ou assinatura digitalizada nunca e removida por engano.
+    """
+    if page.get_text().strip():
+        return False
+    if page.get_images():
+        return False
+    if page.get_drawings():
+        return False
+
+    try:
+        if list(page.annots()):
+            return False
+    except Exception:
+        # Na duvida sobre anotacoes, preserva a pagina
+        return False
+
+    # Confirmacao visual: renderiza em baixa resolucao e exige que TODOS os
+    # pixels sejam brancos. Pega qualquer conteudo que as APIs acima nao vejam.
+    try:
+        pix = page.get_pixmap(dpi=50)
+        if pix.n - pix.alpha < 3:
+            amostra_branca = {255}
+        else:
+            amostra_branca = {(255, 255, 255)}
+        cores = {pix.pixel(x, y)
+                 for x in range(0, pix.width, 10)
+                 for y in range(0, pix.height, 10)}
+        return cores.issubset(amostra_branca)
+    except Exception:
+        # Se nao conseguiu renderizar, nao arrisca remover
+        return False
+
+
+def detectar_paginas_em_branco(doc: fitz.Document) -> list[int]:
+    """Retorna os indices (0-based) das paginas em branco do documento."""
+    return [i for i in range(len(doc)) if pagina_esta_em_branco(doc[i])]
+
+
+# ---------------------------------------------------------------------------
 # Correcao
 # ---------------------------------------------------------------------------
 
@@ -365,14 +415,20 @@ def consolidar_linha(doc: fitz.Document, linha: FragmentedLine) -> str | None:
 
 
 def corrigir_pdf(input_path: Path, output_path: Path | None = None,
-                 output_dir: Path | None = None) -> dict:
+                 output_dir: Path | None = None,
+                 remover_paginas_brancas: bool = True) -> dict:
     """
-    Detecta e corrige todas as linhas fragmentadas de um PDF.
-    Retorna dict com estatisticas: {'fragmentadas': N, 'corrigidas': N, 'avisos': [...]}
+    Detecta e corrige todas as linhas fragmentadas de um PDF e, por padrao,
+    remove as paginas totalmente em branco.
+
+    Retorna dict com estatisticas:
+    {'fragmentadas': N, 'corrigidas': N, 'paginas_removidas': [...], 'avisos': [...]}
 
     output_dir: se fornecido, salva o arquivo corrigido dentro dessa pasta
                 (com o mesmo nome do original, sem sufixo).
     output_path: caminho completo de saida (tem precedencia sobre output_dir).
+    remover_paginas_brancas: remove folhas vazias emitidas pelo Dominio, que
+                fazem o cliente achar que falta conteudo no contrato.
     """
     if output_path is None:
         if output_dir is not None:
@@ -386,9 +442,20 @@ def corrigir_pdf(input_path: Path, output_path: Path | None = None,
     avisos     = []
     corrigidas = 0
 
-    if not linhas:
+    paginas_brancas = detectar_paginas_em_branco(doc) if remover_paginas_brancas else []
+
+    # Nunca esvazia o documento: se todas as paginas forem detectadas como
+    # brancas, algo esta errado — preserva o arquivo como esta.
+    if paginas_brancas and len(paginas_brancas) >= len(doc):
+        avisos.append(
+            f"Todas as {len(doc)} paginas parecem em branco — nenhuma removida"
+        )
+        paginas_brancas = []
+
+    if not linhas and not paginas_brancas:
         doc.close()
-        return {"fragmentadas": 0, "corrigidas": 0, "avisos": [], "output": None}
+        return {"fragmentadas": 0, "corrigidas": 0, "paginas_removidas": [],
+                "avisos": avisos, "output": None}
 
     # Processa de baixo pra cima por pagina (evita deslocamento de coordenadas)
     by_page: dict[int, list[FragmentedLine]] = defaultdict(list)
@@ -402,6 +469,12 @@ def corrigir_pdf(input_path: Path, output_path: Path | None = None,
             if aviso:
                 avisos.append(aviso)
             corrigidas += 1
+
+    # Remove as paginas em branco por ultimo, de tras pra frente, para que os
+    # indices das paginas anteriores nao se desloquem durante a remocao (e para
+    # nao invalidar os page_num usados na correcao de spans acima).
+    for page_num in sorted(paginas_brancas, reverse=True):
+        doc.delete_page(page_num)
 
     # PyMuPDF nao permite doc.save() de volta no mesmo caminho ja aberto
     # com garbage/clean/deflate (exige incremental=True nesse caso). Para
@@ -417,10 +490,11 @@ def corrigir_pdf(input_path: Path, output_path: Path | None = None,
         doc.close()
 
     return {
-        "fragmentadas": len(linhas),
-        "corrigidas":   corrigidas,
-        "avisos":       avisos,
-        "output":       output_path,
+        "fragmentadas":      len(linhas),
+        "corrigidas":        corrigidas,
+        "paginas_removidas": [p + 1 for p in sorted(paginas_brancas)],  # 1-based
+        "avisos":            avisos,
+        "output":            output_path,
     }
 
 
@@ -430,16 +504,22 @@ def corrigir_pdf(input_path: Path, output_path: Path | None = None,
 
 def relatorio_pdf(input_path: Path) -> None:
     """Mostra o que seria corrigido sem modificar o arquivo."""
-    doc    = fitz.open(str(input_path))
-    linhas = detectar_linhas_fragmentadas(doc) + detectar_nomes_filhos(doc)
+    doc     = fitz.open(str(input_path))
+    linhas  = detectar_linhas_fragmentadas(doc) + detectar_nomes_filhos(doc)
+    brancas = detectar_paginas_em_branco(doc)
+    total_paginas = len(doc)
     doc.close()
 
     print(f"\n{'='*60}")
-    print(f"Arquivo: {input_path.name}")
+    print(f"Arquivo: {input_path.name}  ({total_paginas} paginas)")
     print(f"{'='*60}")
 
+    if brancas:
+        print(f"  Pagina(s) em branco (serao removidas): "
+              f"{', '.join(str(p+1) for p in brancas)}")
+
     if not linhas:
-        print("  Nenhuma linha fragmentada detectada. PDF esta correto.")
+        print("  Nenhuma linha fragmentada detectada.")
         return
 
     print(f"  {len(linhas)} linha(s) fragmentada(s) detectada(s):\n")
@@ -459,20 +539,27 @@ def relatorio_pdf(input_path: Path) -> None:
 def _processar_arquivo_ui(input_path: Path, log_fn, output_dir: Path | None = None) -> None:
     log_fn(f"\nProcessando: {input_path.name}")
 
-    doc    = fitz.open(str(input_path))
-    linhas = detectar_linhas_fragmentadas(doc) + detectar_nomes_filhos(doc)
+    doc      = fitz.open(str(input_path))
+    linhas   = detectar_linhas_fragmentadas(doc) + detectar_nomes_filhos(doc)
+    brancas  = detectar_paginas_em_branco(doc)
     doc.close()
 
-    if not linhas:
-        log_fn(f"  OK — nenhuma fragmentacao encontrada.")
+    if not linhas and not brancas:
+        log_fn(f"  OK — nenhuma fragmentacao nem pagina em branco encontrada.")
         return
 
-    log_fn(f"  Encontradas {len(linhas)} linha(s) fragmentada(s):")
-    for l in linhas:
-        log_fn(f"    Pag {l.page_num+1}: {repr(l.text)}  ({len(l.raw_spans)} spans)")
+    if linhas:
+        log_fn(f"  Encontradas {len(linhas)} linha(s) fragmentada(s):")
+        for l in linhas:
+            log_fn(f"    Pag {l.page_num+1}: {repr(l.text)}  ({len(l.raw_spans)} spans)")
+
+    if brancas:
+        log_fn(f"  Pagina(s) em branco a remover: {', '.join(str(p+1) for p in brancas)}")
 
     stats = corrigir_pdf(input_path, output_dir=output_dir)
     log_fn(f"  Corrigidas: {stats['corrigidas']}")
+    if stats["paginas_removidas"]:
+        log_fn(f"  Paginas em branco removidas: {stats['paginas_removidas']}")
     if stats["avisos"]:
         for a in stats["avisos"]:
             log_fn(f"  AVISO: {a}")

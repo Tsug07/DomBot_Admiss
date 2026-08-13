@@ -1478,6 +1478,8 @@ class AutomacaoGUI:
                         self.adicionar_log(f"Corrigindo spans em {len(pdfs)} PDF(s) da pasta...", logging.INFO, "info")
                         total_corrigidas = 0
                         total_com_fragmentacao = 0
+                        total_paginas_removidas = 0
+                        arquivos_com_pagina_branca = 0
                         falhas = 0
                         for pdf_path in pdfs:
                             try:
@@ -1485,6 +1487,15 @@ class AutomacaoGUI:
                                 if stats["fragmentadas"] > 0:
                                     total_com_fragmentacao += 1
                                     total_corrigidas += stats["corrigidas"]
+                                removidas = stats.get("paginas_removidas", [])
+                                if removidas:
+                                    arquivos_com_pagina_branca += 1
+                                    total_paginas_removidas += len(removidas)
+                                    self.adicionar_log(
+                                        f"📄 Página(s) em branco removida(s) de {pdf_path.name}: "
+                                        f"{', '.join(str(p) for p in removidas)}",
+                                        logging.INFO, "info"
+                                    )
                             except Exception as e_corr:
                                 falhas += 1
                                 self.error_logger.error(f"Correção de spans falhou em {pdf_path.name}: {e_corr}")
@@ -1493,6 +1504,12 @@ class AutomacaoGUI:
                             f"({total_corrigidas} linha(s)), {falhas} falha(s)",
                             logging.INFO, "sucesso" if falhas == 0 else "aviso"
                         )
+                        if total_paginas_removidas:
+                            self.adicionar_log(
+                                f"Páginas em branco removidas: {total_paginas_removidas} "
+                                f"em {arquivos_com_pagina_branca} arquivo(s)",
+                                logging.INFO, "sucesso"
+                            )
                 except Exception as e:
                     self.adicionar_log(f"Erro ao corrigir spans na pasta: {str(e)}", logging.WARNING, "aviso")
 
@@ -1639,6 +1656,8 @@ class AutomacaoGUI:
                         self.adicionar_log(f"[Manual] Corrigindo spans em {len(pdfs)} PDF(s)...", logging.INFO, "info")
                         total_corrigidas = 0
                         total_com_fragmentacao = 0
+                        total_paginas_removidas = 0
+                        arquivos_com_pagina_branca = 0
                         falhas = 0
                         for pdf_path in pdfs:
                             try:
@@ -1646,6 +1665,15 @@ class AutomacaoGUI:
                                 if stats["fragmentadas"] > 0:
                                     total_com_fragmentacao += 1
                                     total_corrigidas += stats["corrigidas"]
+                                removidas = stats.get("paginas_removidas", [])
+                                if removidas:
+                                    arquivos_com_pagina_branca += 1
+                                    total_paginas_removidas += len(removidas)
+                                    self.adicionar_log(
+                                        f"[Manual] 📄 Página(s) em branco removida(s) de {pdf_path.name}: "
+                                        f"{', '.join(str(p) for p in removidas)}",
+                                        logging.INFO, "info"
+                                    )
                             except Exception as e_corr:
                                 falhas += 1
                                 self.error_logger.error(f"[MANUAL] Correção de spans falhou em {pdf_path.name}: {e_corr}")
@@ -1654,6 +1682,12 @@ class AutomacaoGUI:
                             f"({total_corrigidas} linha(s)), {falhas} falha(s)",
                             logging.INFO, "sucesso" if falhas == 0 else "aviso"
                         )
+                        if total_paginas_removidas:
+                            self.adicionar_log(
+                                f"[Manual] Páginas em branco removidas: {total_paginas_removidas} "
+                                f"em {arquivos_com_pagina_branca} arquivo(s)",
+                                logging.INFO, "sucesso"
+                            )
                 except Exception as e:
                     self.adicionar_log(f"[Manual] Erro ao corrigir spans: {str(e)}", logging.WARNING, "aviso")
 
