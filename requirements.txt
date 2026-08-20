@@ -1,0 +1,22 @@
+# DomBot_Admiss - dependencias
+# Instalar com: pip install -r requirements.txt
+# Requer Windows (pywinauto / pywin32)
+
+# Interface grafica
+customtkinter>=5.2.0
+Pillow>=10.0.0
+
+# Planilhas
+pandas>=2.0.0
+openpyxl>=3.1.0
+
+# Automacao Windows
+pywinauto>=0.6.8
+pywin32>=306
+
+# PDF (pdf_corrigir_spans.py)
+PyMuPDF>=1.24.0
+
+# HTTP / configuracao
+requests>=2.31.0
+python-dotenv>=1.0.0
